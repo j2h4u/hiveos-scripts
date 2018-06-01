@@ -1,0 +1,89 @@
+Usage ethminer [OPTIONS]
+Options:
+
+Work farming mode:
+    -F,--farm <url>  (deprecated) Put into mining farm mode with the work server at URL (default: http://127.0.0.1:8545)
+    -FF,-FO, --farm-failover, --stratum-failover <url> (deprecated) Failover getwork/stratum URL (default: disabled)
+	--farm-retries <n> Number of retries until switch to failover (default: 3)
+	-S, --stratum <host:port>  (deprecated) Put into stratum mode with the stratum server at host:port
+	-SF, --stratum-failover <host:port>  (deprecated) Failover stratum server at host:port
+    -O, --userpass <username.workername:password> (deprecated) Stratum login credentials
+    -FO, --failover-userpass <username.workername:password> (deprecated) Failover stratum login credentials (optional, will use normal credentials when omitted)
+    --work-timeout <n> reconnect/failover after n seconds of working on the same (stratum) job. Defaults to 180. Don't set lower than max. avg. block time
+    --stratum-ssl [<n>]  (deprecated) Use encryption to connect to stratum server.
+        0: Force TLS1.2 (default)
+        1: Allow any TLS version
+        2: Allow self-signed or invalid certs and any TLS version
+    -SP, --stratum-protocol <n> (deprecated) Choose which stratum protocol to use:
+        0: official stratum spec: ethpool, ethermine, coinotron, mph, nanopool (default)
+        1: eth-proxy compatible: dwarfpool, f2pool, nanopool (required for hashrate reporting to work with nanopool)
+        2: EthereumStratum/1.0.0: nicehash
+    -RH, --report-hashrate Report current hashrate to pool (please only enable on pools supporting this)
+    -HWMON [<n>], Displays gpu temp, fan percent and power usage. Note: In linux, the program uses sysfs, which may require running with root privileges.
+        0: Displays only temp and fan percent (default)
+        1: Also displays power usage
+    --exit Stops the miner whenever an error is encountered
+    -SE, --stratum-email <s> Email address used in eth-proxy (optional)
+    --farm-recheck <n>  Leave n ms between checks for changed work (default: 500). When using stratum, use a high value (i.e. 2000) to get more stable hashrate output
+    -P URL Specify a pool URL. Can be used multiple times. The 1st for for the primary pool, and the 2nd for the failover pool.
+        URL takes the form: scheme://user[:password]@hostname:port[/emailaddress].
+        for getwork use one of the following schemes:
+          http
+        for stratum use one of the following schemes: 
+          stratum+ssl stratum+tcp stratum+tls stratum+tls12 stratum1+ssl stratum1+tcp stratum1+tls stratum1+tls12 stratum2+ssl stratum2+tcp stratum2+tls stratum2+tls12
+        Example 1 : stratum+ssl://0x012345678901234567890234567890123.miner1@ethermine.org:5555
+        Example 2 : stratum1+tcp://0x012345678901234567890234567890123.miner1@nanopool.org:9999/john.doe@gmail.com
+        Example 3 : stratum1+tcp://0x012345678901234567890234567890123@nanopool.org:9999/miner1/john.doe@gmail.com
+
+Benchmarking mode:
+    -M [<n>],--benchmark [<n>] Benchmark for mining and exit; Optionally specify block number to benchmark against specific DAG.
+    --benchmark-warmup <seconds>  Set the duration of warmup for the benchmark tests (default: 3).
+    --benchmark-trial <seconds>  Set the duration for each trial for the benchmark tests (default: 3).
+    --benchmark-trials <n>  Set the number of benchmark trials to run (default: 5).
+Simulation mode:
+    -Z [<n>],--simulation [<n>] Mining test mode. Used to validate kernel optimizations. Optionally specify block number.
+Mining configuration:
+    -G,--opencl  When mining use the GPU via OpenCL.
+    -U,--cuda  When mining use the GPU via CUDA.
+    -X,--cuda-opencl Use OpenCL + CUDA in a system with mixed AMD/Nvidia cards. May require setting --opencl-platform 1 or 2. Use --list-devices option to check which platform is your AMD. 
+    --opencl-platform <n>  When mining using -G/--opencl use OpenCL platform n (default: 0).
+    --opencl-device <n>  When mining using -G/--opencl use OpenCL device n (default: 0).
+    --opencl-devices <0 1 ..n> Select which OpenCL devices to mine on. Default is to use all
+    -t, --mining-threads <n> Limit number of CPU/GPU miners to n (default: use everything available on selected platform)
+    --list-devices List the detected OpenCL/CUDA devices and exit. Should be combined with -G, -U, or -X flag
+    --display-interval <n> Set mining stats display interval in seconds. (default: every 5 seconds)
+    -L, --dag-load-mode <mode> DAG generation mode.
+        parallel    - load DAG on all GPUs at the same time (default)
+        sequential  - load DAG on GPUs one after another. Use this when the miner crashes during DAG generation
+        single <n>  - generate DAG on device n, then copy to other devices
+ OpenCL configuration:
+    --cl-kernel <n>  Use a different OpenCL kernel (default: use stable kernel)
+        0: stable kernel
+        1: experimental kernel
+    --cl-local-work Set the OpenCL local work size. Default is 128
+    --cl-global-work Set the OpenCL global work size as a multiple of the local work size. Default is 8192 * 128
+    --cl-parallel-hash <1 2 ..8> Define how many threads to associate per hash. Default=8
+ CUDA configuration:
+    --cuda-block-size Set the CUDA block work size. Default is 128
+    --cuda-grid-size Set the CUDA grid size. Default is 8192
+    --cuda-streams Set the number of CUDA streams. Default is 2
+    --cuda-schedule <mode> Set the schedule mode for CUDA threads waiting for CUDA devices to finish work. Default is 'sync'. Possible values are:
+        auto  - Uses a heuristic based on the number of active CUDA contexts in the process C and the number of logical processors in the system P. If C > P, then yield else spin.
+        spin  - Instruct CUDA to actively spin when waiting for results from the device.
+        yield - Instruct CUDA to yield its thread when waiting for results from the device.
+        sync  - Instruct CUDA to block the CPU thread on a synchronization primitive when waiting for the results from the device.
+    --cuda-devices <0 1 ..n> Select which CUDA GPUs to mine on. Default is to use all
+    --cuda-parallel-hash <1 2 ..8> Define how many hashes to calculate in a kernel, can be scaled to achieve better performance. Default=4
+    --noeval  bypass host software re-evaluation of GPU solutions.
+        This will trim some milliseconds off the time it takes to send a result to the pool.
+        Use at your own risk! If GPU generates errored results they WILL be forwarded to the pool
+        Not recommended at high overclock.
+ API core configuration:
+    --api-port Set the api port, the miner should listen to. Use 0 to disable. Default=0, use negative numbers to run in readonly mode. for example -3333.
+ General Options:
+    -v,--verbosity <0 - 9>  Set the log verbosity from 0 to 9 (default: 5). Set to 9 for switch time logging.
+    -V,--version  Show the version and exit.
+    -h,--help  Show this help message and exit.
+ Environment variables:
+     NO_COLOR - set to any value to disable color output. Unset to re-enable color output.
+     SYSLOG   - set to any value to strip time and disable color from output, for logging under systemd
