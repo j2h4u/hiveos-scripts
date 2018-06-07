@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 
-#Nicehash donate: 3JKA47P98c9JGCy3GN7qXFC2FzeuJmXuph
-#Zec donate: t1fP9jWyqFEni2p4i9t3byqtimsMKv1y95T
-#ETH donate: 0xe835a7d5605a370e4750279b28f9ce0926061ea2
+echo "Warming up GPUs for 10 mins..."
+sleep 600
 
 export DISPLAY=:0
 . colors
@@ -15,7 +14,7 @@ FAN_MIN=20
 FAN_MAX=100
 
 CARDS_NUM=`nvidia-smi -L | wc -l`
-printf "Found ${CYAN}${CARDS_NUM}${NOCOLOR} GPU(s)\n"
+printf "Found ${CYAN}${CARDS_NUM}${NOCOLOR} GPUs\n"
 
 while true
 do
@@ -27,12 +26,12 @@ do
 		GPU_TEMP=`nvidia-smi -i $i --query-gpu=temperature.gpu --format=csv,noheader`
 		GPU_FAN=`nvidia-smi -i $i --query-gpu=fan.speed --format=csv,noheader,nounits`
 		DIFF=$(( $GPU_TEMP - $TEMP_TARGET ))
-		printf "${WHITE}${i}${NOCOLOR}: "
+		printf "${WHITE}${i}:${NOCOLOR} "
 
 		if [ $DIFF -le -${TEMP_DELTA} ]
 		then
 			echo -n -e "${BBLUE}${GPU_TEMP}${NOCOLOR}°C ${GPU_FAN}%"
-			FAN_SPEED=$(( $GPU_FAN - ${FAN_STEP}))
+			FAN_SPEED=$(( $GPU_FAN + ${DIFF}))
 			if [ $FAN_SPEED -lt ${FAN_MIN} ]
 			then
 				FAN_SPEED=${FAN_MIN}
@@ -44,7 +43,7 @@ do
 		elif [ $DIFF -ge ${TEMP_DELTA} ]
 		then
 			echo -n -e "${BRED}${GPU_TEMP}${NOCOLOR}°C ${GPU_FAN}%"
-			FAN_SPEED=$(( $GPU_FAN + ${FAN_STEP}))
+			FAN_SPEED=$(( $GPU_FAN + ${DIFF}))
 			if [ $FAN_SPEED -gt ${FAN_MAX} ]
 			then
 				FAN_SPEED=${FAN_MAX}
@@ -54,7 +53,7 @@ do
 				echo -n " -> ${FAN_SPEED}%"
 			fi
 		else
-			echo -n -e "${BGREEN}${GPU_TEMP}${NOCOLOR}°C ${GPU_FAN}%"
+			echo -n -e "${GPU_TEMP}°C ${GPU_FAN}%"
 		fi
 		printf ", "
 
