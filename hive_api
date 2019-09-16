@@ -1,0 +1,322 @@
+#!/usr/bin/env bash
+
+. "$(dirname "$0")/functions.sh" # use library
+
+
+#
+# script inventory stuff
+#
+
+script_version='0.1.3'
+script_description='Simple wrapper for HiveOS API'
+script_usage='function_name[#raw] [function_parameters]'
+script_usage+='\n'
+script_usage+='functions: get_worker | get_workers | get_fs | get_oc | apply_fs FS_ID | apply_oc OC_ID'
+script_usage+='\n'
+script_usage+='optional #raw suffix is for raw output instead of pretty-print'
+
+
+#
+# functions
+#
+
+__api_call_method() {
+	#
+	# usage:
+	# __api_call_method method_url [request_type request_data [--no-authorization]]
+	#
+	# sets:
+	# $api_response: <JSON response>
+	# $api_status_code: <http response code>
+	#
+	# examples:
+	# __api_call_method "/auth/check"
+	# __api_call_method "/auth/login" POST "{\"login\":\"$login\",\"password\":\"$password\",\"remember\": true}" --no-authorization
+	# __api_call_method "/farms/$FARM_ID/workers/$RIG_ID" PATCH "{\"fs_id\": $1}"
+	#
+	arguments: $# range 1 4
+
+	local method_url="${1-}"
+	local request_type="${2-}"
+	local request_data="${3-}"
+	local authorization_type="${4-}"
+	local curl_output=''
+
+	# set to default
+	api_status_code='' # looks eye-catching, eh
+	api_response='[placeholder]'
+
+	if is_debug; then
+		_info_message 'method_url:' "${method_url[@]}"
+		_info_message 'request_type:' "${request_type[@]}"
+		_info_message 'request_data:' "${request_data[@]}"
+		_info_message 'authorization_type:' "${authorization_type[@]}"
+		errcho
+	fi
+
+	if [[ -z $authorization_type ]]; then
+		authorization_type=( --header "Authorization: Bearer $access_token" )
+	else
+		# dirty hack because curl doesn't like empty parameters like ''
+		authorization_type=( --silent )
+	fi
+
+	if [[ ! -z $request_type ]]; then
+		request_type=( --request "$request_type" )
+		request_data=( --data "$request_data" )
+	else
+		# dirty hack because curl doesn't like empty parameters like ''
+		request_type=( --silent )
+		request_data=( --silent )
+	fi
+
+	if is_debug; then
+		_info_message 'method_url:' "${method_url[@]}"
+		_info_message 'request_type:' "${request_type[@]}"
+		_info_message 'request_data:' "${request_data[@]}"
+		_info_message 'authorization_type:' "${authorization_type[@]}"
+		errcho
+	fi
+
+	curl_output=$(curl --silent --write-out '\n%{http_code}' \
+		--header 'Content-Type: application/json' \
+		"${authorization_type[@]}" \
+		"${request_type[@]}" \
+		"${request_data[@]}" \
+		"${api_endpoint_url}${method_url}")
+
+	[ $? -ne 0 ] && _die 'Curl failed, arguments:' "${@}"
+
+	# get last line as status code
+	api_status_code="${curl_output##*$'\n'}"
+	# remove status code from response: delete last line
+	api_response="${curl_output%$'\n'"$api_status_code"}"
+
+	if_debug: _info_message "HTTP status code '$api_status_code', arguments:" "${@}"
+}
+
+_api_call_method_wrapper() {
+	#
+	# error-handling wrapper for __api_call_method
+	#
+	arguments: $# range 1 4
+
+	__api_call_method "$@"
+
+	if [[ $api_status_code -lt 200 || $api_status_code -ge 300 ]]; then
+		_warning_message "HTTP status code '$api_status_code'. Raw response:" "$api_response"
+		echo "$api_response" | jq || _die "jq failed"
+	fi
+}
+
+api_check_connectivity() {
+	arguments: $# none
+
+	# we need to handle errors on our own, so we use raw __api_call_method without error-handling wrapper
+	__api_call_method "/auth/check"
+
+	if [[ $api_status_code -lt 200 || $api_status_code -ge 300 ]]; then
+		_warning_message "HTTP status code '$api_status_code'. Raw response:" "$api_response"
+		return 1
+	else
+		# only codes [200..299] lead to success
+		return 0
+	fi
+}
+
+api_check_token() {
+	arguments: $# none
+
+	_api_call_method_wrapper "/auth/check"
+
+	if [[ "$api_status_code" -eq 204 ]]; then
+		return 0
+	else
+		return 1
+	fi
+}
+
+api_get_by_url() {
+	### not used?
+	arguments: $# atleast 1
+
+	_api_call_method_wrapper "$@"
+	_info_message "HTTP status code: $api_status_code"
+}
+
+api_get_workers() {
+	arguments: $# none
+
+	_api_call_method_wrapper "/farms/$FARM_ID/workers"
+}
+
+api_get_worker() {
+	arguments: $# none
+
+	_api_call_method_wrapper "/farms/$FARM_ID/workers/$RIG_ID"
+}
+
+api_get_fs() {
+	arguments: $# none
+
+	_api_call_method_wrapper "/farms/$FARM_ID/fs"
+}
+
+api_get_oc() {
+	arguments: $# none
+
+	_api_call_method_wrapper "/farms/$FARM_ID/oc"
+}
+
+api_apply_fs() {
+	arguments: $# exactly 1
+
+	_api_call_method_wrapper "/farms/$FARM_ID/workers/$RIG_ID" PATCH "{\"fs_id\": $1}"
+}
+
+api_apply_oc() {
+	arguments: $# exactly 1
+
+	_api_call_method_wrapper "/farms/$FARM_ID/workers/$RIG_ID" PATCH "{\"oc_id\": $1}"
+}
+
+#api_do_login() {
+#	#
+#	# hadn't checked this one at all
+#	# probably doesn't work with 2FA activated
+#	#
+#	#local login='your_login'
+#	#local password='your_passwd'
+#
+#	_api_call_method_wrapper "/auth/login" POST "{\"login\":\"$login\",\"password\":\"$password\",\"remember\": true}" --no-auth
+#
+#	# Extract access token
+#	access_token=$(echo "$api_response" | jq --raw-output '.access_token')
+#}
+
+#old_login() {
+#	api_response=$(curl --silent --write-out "\n%{http_code}" \
+#		--header "Content-Type: application/json" \
+#		--request POST \
+#		--data "{\"login\":\"$login\",\"password\":\"$password\",\"remember\": true}" \
+#		"$api_endpoint_url/auth/login")
+#
+#	[ $? -ne 0 ] && (>&2 echo 'Curl error') && exit 1
+#	api_status_code=$(echo "$api_response" | tail -1)
+#	# remove last line
+#	api_response=$(echo "$api_response" | sed '$d')
+#	[[ $api_status_code -lt 200 || $api_status_code -ge 300 ]] && { echo "$api_response" | jq 1>&2; } && exit 1
+#
+#	# Extract access token
+#	access_token=$(echo "$api_response" | jq --raw-output '.access_token')
+#}
+
+api_get_oc_values() {
+	arguments: $# none
+
+	api_get_oc
+	errcho "$(jq --raw-output '.data[] | .name + " - " + (.id | tostring)' <<< "$api_response")"
+	api_response='' # don't need final output
+}
+
+api_get_oc_as_table() {
+	arguments: $# none
+
+	api_get_oc
+	jq --raw-output '.data[] | .name + " - " + (.id | tostring)' <<< "$api_response"
+}
+
+api_get_workers_as_table() {
+	arguments: $# none
+
+	api_get_workers
+	jq --raw-output '.data[] | .name + " - " + (.id | tostring)' <<< "$api_response"
+}
+
+api_switch_oc_by_daytime() {
+	#
+	# Usage: oc_by_daytime day|night
+	#
+	arguments: $# exactly 1
+
+	local RIG_ID=''
+	local -A rigs
+	local -A rig_dict
+	local daytime="${1-}"
+
+	workers_table=$(api_get_workers_as_table) # no $api_response set because of sub-shell
+	oc_table=$(api_get_oc_as_table) # no $api_response set because of sub-shell
+
+	while IFS=' - ' read -r _name _id; do
+		local rigs["${_name}"]="$_id"
+		local rig_dict["${_name}".rig_id]="$_id"
+	done <<< "$workers_table"
+
+	while IFS=' - ' read -r _name _daytime _id; do
+		local rig_dict["${_name}"."${_daytime}".oc_id]="$_id"
+	done <<< "$oc_table"
+
+	for rig in "${!rigs[@]}"; do
+		RIG_ID="${rig_dict[$rig.rig_id]}"
+		errcho "Setting $rig (#${rig_dict[$rig.rig_id]}) to $daytime O/C profile (#${rig_dict[$rig.$daytime.oc_id]})"
+		api_apply_oc "${rig_dict[$rig.$daytime.oc_id]}"
+	done
+
+	api_response='' # don't need final output
+}
+
+
+#
+# variables
+#
+
+source "$RIG_CONF"
+
+# consts
+
+declare -r DEBUG=
+declare -r api_endpoint_url='https://api2.hiveos.farm/api/v2'
+declare -r access_token='eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJodHRwczpcL1wvYXBpIiwiaWF0IjoxNTU1NTU2OTc4LCJleHAiOjE4NzA5MTY5NzgsIm5iZiI6MTU1NTU1Njk3OCwianRpIjo0OTU2MDM5LCJzdWIiOjQ5NTYwMzl9.qyx7Y_eGqYPItLOtFYSoLqsqBrLv5i5fWf72RKQutNA'
+declare -r raw_suffix='#raw'
+
+# vars
+
+declare -i api_status_code=999999999
+declare api_response='[placeholder]'
+
+
+#
+# main()
+#
+
+# enum all functions?
+
+if is_variable_empty "${1-}"; then
+	print_script_version
+	print_script_usage
+	exit 1
+fi
+
+inner_function_name="api_${1%*$raw_suffix}"
+
+if ! is_function_exist "$inner_function_name";	then _die "Function '$inner_function_name' not defined"; fi
+if ! api_check_connectivity;				then _die "No connectivity"; fi
+if ! api_check_token;						then _die "Token not authorized"; fi
+
+$inner_function_name "${@:2}"
+
+case "${1-}" in
+	*"$raw_suffix")
+		# '#raw' is a mere indicator to not to pretty print function output
+		if is_variable_not_empty "$api_response"; then
+			echo "$api_response"
+		fi
+		;;
+	*)
+		if is_variable_not_empty "$api_response"; then
+			echo "$api_response" | jq '.'
+		fi
+		;;
+esac
+
+exit 0

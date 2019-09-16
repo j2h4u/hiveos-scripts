@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+
+. "$(dirname "$0")/functions.sh" # use library
+
+
+#
+# script inventory stuff
+#
+
+script_version='0.1.5'
+script_description='Twice a day job: saving and processing logs, autoswitch profile flipping'
+
+
+#
+# functions
+#
+
+bright_echo() {
+	echo
+	echo -e "${BGREEN}$*${NOCOLOR}"
+	#echo -e -n "${DGRAY}"
+	#echo -e -n "$*" | sed 's/./-/g'
+	#echo -e -n "${NOCOLOR}"
+	echo
+}
+
+
+#
+# main()
+#
+
+time_of_day=$(autoswitch-profile whats-next)
+
+if [[ "$HOSTNAME" = "ch1" ]]; then
+	bright_echo "Applying OC profiles for $time_of_day..."
+	hive_api switch_oc_by_daytime "$time_of_day"
+fi
+
+bright_echo "Restarting miner(s)..."
+miner restart && sleep 2
+
+bright_echo "Flipping autoswitch profile..."
+autoswitch-profile "$time_of_day"
+
+bright_echo "Copying logs..."
+cp --verbose /var/log/miner/t-rex/t-rex.?.log ~/bin/t-rex/
+
+bright_echo "Renaming logs to their timestamps..."
+ren2timestamp t-rex/*
+
+bright_echo "Deleting duplicated logs..."
+if is_file_exist "~/bin/t-rex/t-rex.?.log"; then
+	rm --verbose ~/bin/t-rex/t-rex.?.log
+else
+	echo "No any logs to delete"
+fi

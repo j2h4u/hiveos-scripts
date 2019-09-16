@@ -1,0 +1,1928 @@
+#!/usr/bin/env bash
+
+
+#
+# script inventory stuff
+#
+
+# shellcheck disable=SC2034
+{
+	declare -r script_version='0.6.3'
+	declare -r script_description='Positionless Nvidia UUID overclock manager for HiveOS'
+	declare -r script_usage='[r[efresh]]\n\n*** Must be sourced inside of the nvidia-oc script. ***'
+	declare -r script_name="${BASH_SOURCE[0]}"
+
+	# must be empty in the release
+	# must be placed BEFORE the sourcing library
+	declare -r DEBUG=
+}
+
+# use library. must be placed at the very begining, but after DEBUG!
+source "$( dirname "$script_name" )/functions.sh" || exit 1
+
+
+#
+# Functions
+#
+
+
+#
+# Misc
+#
+
+is_sourced() {
+	[[ "${BASH_SOURCE[0]}" != "$0" ]]
+}
+
+
+#
+# Messages: info, warning, error
+#
+
+print_message() {
+	arguments: $# exactly 2
+
+	local -r level="$1"
+	local message_text="$2"
+
+	local level_color=''
+	local newline=''
+
+	case "$level" in
+		'ERR')
+			level_color="$ERROR_COLOR"
+			;;
+		'WARN')
+			level_color="$WARNING_COLOR"
+			;;
+		'INFO')
+			level_color="$INFO_COLOR"
+			;;
+		'OK')
+			level_color="$OK_COLOR"
+			;;
+		'DIM')
+			level_color="$DIM_COLOR"
+			;;
+		'BOLD')
+			level_color="$BOLD_COLOR"
+			;;
+	esac
+
+	if [[ "${message_text: -2}" == '\n' ]]; then
+		message_text="${message_text:0:-2}" # strip ending '\n'
+		newline='\n'
+	fi
+
+	printf '%b%b%b%b' "$level_color" "$message_text" "${NOCOLOR}" "$newline"
+}
+
+print_message_OK_or_ERR() { local -r -i exit_code="$?" # must be the first command in the function to appropriately catch the exit code
+	#
+	# Usage: print_message_OK_or_ERR 'ok_message' 'err_message'
+	#
+	arguments: $# exactly 2
+
+	# args
+
+	local -r ok_message="$1"
+	local -r err_message="$2"
+
+	# consts
+
+	local -r -i OK_or_ERR="$( boolean::bash2c "$exit_code" )"
+
+	# code
+
+	if (( OK_or_ERR )); then
+		print_message OK "$ok_message"
+	else
+		print_message ERR "$err_message"
+	fi
+		
+	return "$exit_code" # pass the exit code (let's be completely transparent in pipes)
+}
+
+
+#
+# Caches: load, save, populate, rotate
+#
+
+rotate_file() {
+	#
+	# Usage: rotate_file 'file_to_rotate'
+	#
+	arguments: $# exactly 1
+
+	# consts
+
+	local -r file_to_rotate="$1"
+	local -r -i cycle_versions=300
+
+	# vars
+
+	local savelog_message=''
+
+	# code
+
+	printf 'Rotate file... '
+
+	# does log file exist?
+	if [[ -f "$file_to_rotate" ]]; then
+		# yes. let's rotate.
+		#
+		# savelog options:
+		# -c cycle	Save cycle versions of the logfile (default: 7). The cycle count must be at least 2.
+		# -l		don't compress any log files (default: do compress)
+		# -n		do not rotate empty files
+		printf '%b' "${ERROR_COLOR}" # if savelog would say something to the stderr, we colorize it
+		if { savelog_message=$( savelog -c "$cycle_versions" -l -n "$file_to_rotate" ); }; then # sync all files in the rotate
+			printf '%b%s' "${NOCOLOR}" "$savelog_message"
+			sync "$file_to_rotate"*; print_message_OK_or_ERR ' Synced.\n' ' Sync error.\n'
+		else
+			print_message ERR "Error: $savelog_message\n"
+		fi
+	else
+		# not exists
+		print_message INFO 'Nothing to rotate: file not exists yet.\n'
+	fi
+}
+
+save_dictionaries_to_cache() {
+	#
+	# Usage: save_dictionaries_to_cache 'cache_file_name' 'dictionary_name' ['dictionary_name'...]
+	#
+	arguments: $# atleast 2
+
+	# consts
+
+	local -r cache_file_name="$1"
+	local -r -a dictionaries_array=( "${@:2}" ) # take $2..$MAX to the array
+
+	# vars
+
+	local dictionary_name=''
+
+	# code
+
+	printf 'Saving cache to %s...' "$cache_file_name"
+
+	{
+		printf '# Array cache\n\n'
+		for dictionary_name in "${dictionaries_array[@]}"; do
+			print_array "$dictionary_name"
+		done
+	} > "$cache_file_name"
+
+	sync "$cache_file_name"; print_message_OK_or_ERR ' Saved. Synced.\n' ' Sync error.\n'
+}
+
+load_dictionaries_from_cache() {
+	#
+	# Usage: load_dictionaries_from_cache 'cache_file_name' ['cache_description']
+	#
+	arguments: $# range 1 2
+
+	# args
+
+	local -r cache_file_name="$1"
+	local cache_description_DEFAULT='<undefined>'
+	local cache_description="${2-${cache_description_DEFAULT}}"
+
+	# flags
+
+	local -i load_dictionaries_from_cache_SUCCESS="$boolean_bash_false"
+
+	# code
+
+	printf 'Loading %s cache from %s...' "$cache_description" "$cache_file_name"
+
+	if is_file_exist "$cache_file_name"; then
+		if { source "$cache_file_name"; }; then
+			load_dictionaries_from_cache_SUCCESS="$boolean_bash_true"
+			print_message OK ' Done.\n'
+		else
+			print_message ERR ' Loading error.\n'
+		fi
+	else
+		print_message INFO ' Not found.\n'
+	fi
+
+	return "$load_dictionaries_from_cache_SUCCESS"
+}
+
+
+#
+# Dictionaries: init, populate, update
+#
+
+init_base_data_structures() {
+	arguments: $# none
+
+	# consts
+
+	declare -r -g permanent_cache_file="$script_name.cache"
+	# shellcheck disable=SC2155
+	declare -r -g session_cache_file="/tmp/$( basename "$script_name" ).session_cache"
+	declare -r -g history_file="$script_name.history"
+	declare -r -g not_migrant_attribute='-' # must NOT be ' ' because of subsequent flattening. Use any chars not in IFS.
+	declare -r -i -g oc_disabled_attribute=71
+
+	# colors
+	#declare -r -g NORMAL_COLOR="${LGRAY-}" # not used
+	declare -r -g DIM_COLOR="${DGRAY-}"
+	declare -r -g BOLD_COLOR="${WHITE-}"
+	declare -r -g DIFFERENCE_COLOR="${CYAN-}"
+	declare -r -g ERROR_COLOR="${BRED-}"
+	declare -r -g OK_COLOR="${GREEN-}"
+	declare -r -g INFO_COLOR="${YELLOW-}"
+	declare -r -g WARNING_COLOR="${RED-}"
+	declare -r -g NOCOLOR="${NOCOLOR-}"
+
+	# frames
+	declare -r -g FRAME_COLOR="${DGRAY-}"
+	declare -r -g FRAME_HORIZONTAL_LINE='-'
+	declare -r -g FRAME_VERTICAL_LINE='|'
+	declare -r -g -i TABLE_DESCRIPTION_WIDTH=11
+	declare -r -g -i TABLE_NUMBER_WIDTH=6
+
+	#declare -r -a -g rig_list=(
+	#	'ch1'
+	#	'ch2'
+	#	'ch3'
+	#)
+
+	declare -r -g -a time_of_day_list=(
+		'day'
+		'night'
+	)
+
+	declare -r -g -a algo_list=(
+		'default'
+		'cuckoo'
+		'equihash 150/5'
+		'ethash'
+		'x16r'
+	)
+
+	# O/C elements from Hive API
+	# order of elements must be in sync with an parent_oc_entity_list[]
+	declare -r -g -a oc_entity_list=(
+		'core_clock'
+		'mem_clock'
+		'fan_speed'
+		'power_limit'
+	)
+
+	# names of the private arrays from the parent, /hive/sbin/nvidia-oc
+	# order of elements must be in sync with an oc_entity_list[]
+	declare -r -a -g parent_oc_entity_list=(
+		'CLOCK'
+		'MEM'
+		'FAN'
+		'PLIMIT'
+	)
+
+	declare -r -g -A fs_algo_to_oc_algo_dictionary=(
+		['Autoswitch Beam']='equihash 150/5'
+		['Autoswitch BeamV2']='equihash 150/5'
+		['Autoswitch CryptoNightHeavy']=''
+		['Autoswitch CryptoNightR']=''
+		['Autoswitch CryptoNightV7']=''
+		['Autoswitch CryptoNightV8']=''
+		['Autoswitch CuckooAE']='cuckoo'
+		['Autoswitch Ethash']='ethash'
+		['Autoswitch Grin29']='cuckoo'
+		['Autoswitch Grin29d']='cuckoo'
+		['Autoswitch Grin31']='cuckoo'
+		['Autoswitch Keccak']=''
+		['Autoswitch Lyra2RE']=''
+		['Autoswitch Lyra2RE2']=''
+		['Autoswitch Lyra2rev3']=''
+		['Autoswitch Lyra2Z']=''
+		['Autoswitch MTP']=''
+		['Autoswitch NeoScrypt']=''
+		['Autoswitch Nist5']=''
+		['Autoswitch Skunk']=''
+		['Autoswitch X16r']='x16r'
+		['Autoswitch Zhash']=''
+		['Autoswitch Zil']=''
+	)
+
+	# shellcheck disable=SC2034
+	declare -r -g -A uuid_to_global_index_dictionary=(
+		['GPU-7ec26c9e-3984-00ff-88e8-aa9484fc79db']='ch1.0'
+		['GPU-f89ad6a3-6a14-123f-1c13-95931eaa10cb']='ch1.1'
+		['GPU-5dac5295-e341-5d68-e951-4b7561f811c6']='ch1.2'
+		['GPU-5388acdd-1501-813d-deea-9200cb73f6c1']='ch1.3'
+		['GPU-b6e734d0-cc06-b135-3e36-3b1db2ff36b2']='ch1.4'
+		['GPU-b1bae672-d150-aa41-fc7e-b1d051f4c6cd']='ch1.5'
+		['GPU-36d613bd-a94d-3c21-1696-4d417b1941d1']='ch1.6'
+		['GPU-d18a4666-6f51-3a44-9346-dbba4eab5c1c']='ch1.7'
+		['GPU-80643240-67b1-6936-c031-8548d4859199']='ch1.8'
+		['GPU-78eb3764-9e79-d59f-62a9-7e47b5e34c14']='ch1.9'
+		['GPU-b75a69cd-4d12-5d50-10f6-c0f1ce5f6260']='ch2.0'
+		['GPU-76fbe2dd-6a1c-65c5-93a3-656062655f13']='ch2.1'
+		['GPU-7b440de1-744b-c5f8-a738-d2aafdbbf1f4']='ch2.2'
+		['GPU-1f12d2f8-9076-a50f-b03b-d0c60f71980a']='ch2.3'
+		['GPU-aeee53ad-f323-8f2a-d9fe-c12cad414159']='ch2.4'
+		['GPU-fa168082-2a00-ad77-3f08-ce6e07171e28']='ch2.5'
+		['GPU-f5c39503-9cb3-d16d-efb1-f5dcba6e5954']='ch2.6'
+		['GPU-2cb8cea1-b824-67b5-8116-6a0a09ff0ba2']='ch2.7'
+		['GPU-c461e75d-2340-17ed-0dbc-32b467165861']='ch2.8'
+		['GPU-f1961986-310b-bd75-9663-22c649aebe4d']='ch3.0'
+		['GPU-eed4a338-4156-5f3d-175f-b4d42bfef6d1']='ch3.1'
+		['GPU-319bc0b6-bf4e-c216-168e-1dfbcfa48237']='ch3.2'
+		['GPU-00504235-b0ac-4e15-32a0-0b1143b940b8']='ch3.3'
+		['GPU-3c8752b0-edb3-a80a-fa20-8c94e3a8ca84']='ch3.4'
+		['GPU-be6b7ef1-a13a-96c5-192c-c7f1a1eb1632']='ch3.5'
+		['GPU-79b132ba-e7a1-df77-5445-c6592cb7b55e']='ch3.6'
+		['GPU-296df21d-8070-3140-cf55-5dfaa8431bb9']='ch3.7'
+		['GPU-de23b4b3-a936-6ea6-edad-141566a79a27']='ch3.8'
+		['GPU-4d78757b-18a0-1f34-ce29-8a883538861a']='ch3.9'
+		['GPU-de29134d-b52b-e8db-4034-7e878ad3e9ac']='ch3.10'
+	)
+
+	# vars
+
+	declare -g -i forcibly_refresh_cache="$boolean_c_false"
+	declare -g -i extended_oc_management_enabled="$boolean_c_true"
+
+	declare -g -A initial_global_positional_dictionary=() # all O/C templates based on rig# and gpu#. All O/C's as positional values in the string 'xxx xxx ...'
+	declare -g -A current_local_positional_dictionary=() # all O/C templates based on rig# and gpu#. All O/C's as positional values in the string 'xxx xxx ...'
+	declare -g -a local_index_to_uuid_dictionary=() # translate local GPU index to its UUID: ( ['local_gpu_index']='uuid' )
+
+	# if not sourced, prepare the dummy parent arrays
+	if ! { is_sourced; }; then
+		# shellcheck disable=SC2034
+		{
+		declare -a MEM=( -1500 -1500 -1500 -1500 -1500 -1500 -1500 -1500 -1500 -1500 )
+		declare -a CLOCK=( 180 180 160 179 180 150 130 144 180 175 )
+		declare -a FAN=( 70 70 70 70 70 70 70 70 70 70 )
+		declare -a PLIMIT=( 147 103 73 63 110 115 102 77 75 75 )
+		}
+	fi
+}
+
+
+#
+# initial_global_positional_dictionary[]: populate
+#
+
+populate_initial_global_positional_dictionary() {
+	#
+	# Populate dictionary right from the Hive API
+	#
+	# Hive API -> JSON -> hash array in text variable -> source that variable => PROFIT
+	#
+	arguments: $# none
+
+	# vars
+
+	local oc_as_json=''
+	local oc_array_as_text=''
+
+	# flags
+
+	local -a -i hive_api_get_oc_SUCCESS="$boolean_c_false"
+	local -a -i jq_SUCCESS="$boolean_c_false"
+
+	# code
+
+	printf 'Getting JSON O/C dataset from Hive API...'
+
+	oc_as_json="$( /home/user/bin/hive_api get_oc )"; grab_exit_code_to_c_boolean 'hive_api_get_oc_SUCCESS'
+	readonly oc_as_json # just to be safe
+
+	if (( ! hive_api_get_oc_SUCCESS )); then
+		_die "Something goes wrong. 'hive_api' exit code was ${hive_api_get_oc_SUCCESS[1]}."
+	fi
+
+	print_message OK ' Done.\n'
+
+	# to filter by rig: 
+	# jq --raw-output --arg worker_name "$HOSTNAME" --arg bash_dictionary_array initial_global_positional_dictionary '
+	# .data[] | select(.name | startswith($worker_name)) | (.name | split(" - ")[0] + "." + split(" - ")[1]) as $nm |
+
+	printf 'Processing JSON...'
+
+	# shellcheck disable=SC2016
+	oc_array_as_text="$(
+		jq --raw-output --arg 'bash_dictionary_array' 'initial_global_positional_dictionary' '
+			.data[] | (.name | split(" - ")[0] + ".oc." + split(" - ")[1]) as $nm |
+				(
+					$bash_dictionary_array + "[\"" + $nm + ".default:core_clock\"]=\"" + .options.default.nvidia.core_clock + "\"",
+					$bash_dictionary_array + "[\"" + $nm + ".default:mem_clock\"]=\"" + .options.default.nvidia.mem_clock + "\"",
+					$bash_dictionary_array + "[\"" + $nm + ".default:fan_speed\"]=\"" + .options.default.nvidia.fan_speed + "\"",
+					$bash_dictionary_array + "[\"" + $nm + ".default:power_limit\"]=\"" + .options.default.nvidia.power_limit + "\""
+				),
+				(
+					.options.by_algo[] |
+						(
+							$bash_dictionary_array + "[\"" + $nm + "." + .algo + ":core_clock\"]=\"" + .nvidia.core_clock + "\"",
+							$bash_dictionary_array + "[\"" + $nm + "." + .algo + ":mem_clock\"]=\"" + .nvidia.mem_clock + "\"",
+							$bash_dictionary_array + "[\"" + $nm + "." + .algo + ":fan_speed\"]=\"" + .nvidia.fan_speed + "\"",
+							$bash_dictionary_array + "[\"" + $nm + "." + .algo + ":power_limit\"]=\"" + .nvidia.power_limit + "\""
+						)
+				)
+			' <<< "$oc_as_json"
+	)"; grab_exit_code_to_c_boolean 'jq_SUCCESS'
+	readonly oc_array_as_text # just to be safe
+
+	if (( ! jq_SUCCESS )); then
+		_die "Something goes wrong. 'jq' exit code was ${jq_SUCCESS[1]}."
+	fi
+
+	print_message OK ' Done.\n'
+
+	source <(printf '%s' "$oc_array_as_text")
+	readonly initial_global_positional_dictionary # just to be safe
+}
+
+
+#
+# local_index_to_uuid_dictionary[]: populate
+#
+
+populate_local_index_to_uuid_dictionary() {
+	arguments: $# none
+
+	# vars
+
+	local nvidia_smi_output=''
+	local -i read_index=0
+	local read_uuid=''
+	local -i local_gpu_counter=0
+
+	# flags
+
+	local -a -i nvidia_smi_SUCCESS="$boolean_c_false"
+
+	# code
+
+	printf 'Enumerating local GPUs...'
+
+	nvidia_smi_output="$( nvidia-smi --format=csv,nounits,noheader --query-gpu=index,uuid )"; grab_exit_code_to_c_boolean 'nvidia_smi_SUCCESS'
+	readonly nvidia_smi_output # just to be safe
+
+	# sanity check #1, int comparison
+	if (( ! nvidia_smi_SUCCESS )); then
+		_error_message "nvidia-smi exit code is '${nvidia_smi_SUCCESS[1]}'"
+	fi
+
+	# sanity check #2, char comparison
+	if [[ "${nvidia_smi_output:0:1}" != '0' ]]; then
+		_error_message 'nvidia_smi gone wild' "${nvidia_smi_output}"
+		nvidia_smi_SUCCESS="$boolean_c_false"
+	fi
+
+	if (( nvidia_smi_SUCCESS )); then
+		while IFS=', ' read -r read_index read_uuid; do # warning! IFS is not a composite string, it's just multi-char. ', ' = ( ',' | ' ' )
+			local_index_to_uuid_dictionary["$read_index"]="$read_uuid"
+			printf ' %u' "$(( ++local_gpu_counter ))"
+		done <<< "$nvidia_smi_output"
+		readonly local_index_to_uuid_dictionary # just to be safe
+		printf '. '
+		print_message OK "$local_gpu_counter found.\n"
+	fi
+
+	return "$( boolean::c2bash "$nvidia_smi_SUCCESS" )"
+}
+
+
+#
+# current_local_positional_dictionary[]: populate with locations, update with o/c, print
+#
+
+populate_current_local_positional_dictionary_with_locations() {
+	#
+	# Update 'current_local_positional_dictionary' with gpu's current locations like 'ch1.3 - - ch1.0 - - - - - -'
+	#
+	# Usage: populate_current_local_positional_dictionary_with_locations
+	#
+	# Based on 'uuid_to_global_index_dictionary' and 'local_index_to_uuid_dictionary'.
+	# f.e.:
+	# current_local_positional_dictionary["meta:has_migrants]='true'|'false'
+	# current_local_positional_dictionary["meta:migrants_list]='ch1.3 - - ch1.0 - - - - - -'
+	#
+	arguments: $# none
+
+	# consts
+
+	local -r current_rig="$HOSTNAME"
+	local -r -i local_gpu_count="${#local_index_to_uuid_dictionary[@]}"
+
+	# vars
+
+	local -i current_gpu_number=0
+	local uuid=''
+
+	local initial_rig_and_position=''
+	local current_rig_and_position=''
+
+	local -a migrants_array=()
+	local has_migrants="$boolean_c_false"
+
+	# code
+
+	printf 'Processing eventual GPU migrations...'
+
+	# loop over the all local GPUs in ordered manner
+	for (( current_gpu_number=0; current_gpu_number < local_gpu_count; current_gpu_number++ )); do
+		uuid=${local_index_to_uuid_dictionary[current_gpu_number]}
+
+		initial_rig_and_position="$( get_hash 'uuid_to_global_index_dictionary' "${uuid}" 'STRICT' )"
+		current_rig_and_position="$current_rig.$current_gpu_number"
+
+		# is gpu indigenous?
+		if [[ "$current_rig_and_position" == "$initial_rig_and_position" ]]; then
+			# yes, gpu did not relocated from somewhere
+			# write '-'
+			migrants_array[$current_gpu_number]="$not_migrant_attribute"
+		else
+			# no. a new gpu on the block!
+			# write old position like 'rig.index'
+			migrants_array[$current_gpu_number]="${initial_rig_and_position}"
+			has_migrants="$boolean_c_true"
+		fi
+
+	done
+
+	# update current dictionary on the migrants
+	set_hash 'current_local_positional_dictionary' "meta:has_migrants" "$( boolean::c2string "$has_migrants" )"
+	set_hash 'current_local_positional_dictionary' "meta:migrants_list" "${migrants_array[*]}" # flatten array
+
+	if (( has_migrants )); then
+		print_message INFO ' Some GPUs migrated!\n'
+	else
+		print_message OK ' No migrations detected.\n'
+	fi
+}
+
+get_fields_count_from_oc_string() {
+	#
+	# Get the count of fields (1-based) from whitespace-delimitied string
+	#
+	# Usage: get_fields_count_from_oc_string 'oc_string'
+	#
+	arguments: $# exactly 1
+
+	# consts
+
+	local -r -a string_to_array=( $1 ) # split string to array by IFS=' \t\n'
+
+	# code
+
+	printf '%u\n' "${#string_to_array[@]}"
+}
+
+get_field_by_index_from_oc_string() {
+	#
+	# Get n-th (zero-based) field from whitespace-delimitied string
+	#
+	# Usage: get_field_by_index_from_oc_string 'index' 'oc_string'
+	#
+	# if field does not exist, return 0-th field AND set exit code to 1.
+	#
+	arguments: $# exactly 2
+
+	# consts
+
+	local -r -i index="$1"
+	local -r -a string_to_array=( $2 ) # split string to array by ' '
+
+	# flags
+
+	local -i get_field_by_index_from_oc_string_SUCCESS
+	local -i field_does_exist
+
+	# code
+
+	[[ -n "${string_to_array[$index]-}" ]]; grab_exit_code_to_c_boolean 'field_does_exist'
+
+	if (( field_does_exist )); then
+		printf '%s\n' "${string_to_array[$index]}"
+		get_field_by_index_from_oc_string_SUCCESS="$boolean_bash_true"
+	else
+		printf '%s\n' "${string_to_array[0]}"
+		get_field_by_index_from_oc_string_SUCCESS="$boolean_bash_false"
+	fi
+
+	return "$get_field_by_index_from_oc_string_SUCCESS"
+}
+
+# shellcheck disable=SC2120
+reduce_oc_string() {
+	#
+	# Reduce 'nn nn nn nn nn nn' to 'nn' if all elements are equal
+	#
+	# Usage: reduce_oc_string 'string'
+	# Usage: reduce_oc_string '${array[@]}'
+	# Usage: echo 'string' | reduce_oc_string
+	# Usage: echo '${array[@]}' | reduce_oc_string
+	#
+	arguments: $# any
+
+	# consts
+
+	local -r -a array=( ${@:-$( </dev/stdin )} ) # get from args or stdin
+	local -r -i array_length="${#array[@]}"
+	local -r first_element="${array[0]}"
+
+	# vars
+
+	local -i iterator
+	local current_element=''
+
+	# flags
+
+	local -i all_elements_equal="$boolean_c_true" # default
+
+	# code
+
+	# compare all elements against 1st, starting from 2nd element
+	for (( iterator=1; iterator < array_length; iterator++ )); do
+		current_element="${array[$iterator]}"
+		if [[ "$current_element" != "$first_element" ]]; then
+			all_elements_equal="$boolean_c_false"
+			break
+		fi
+	done
+
+	if (( all_elements_equal )); then
+		printf '%s\n' "${array[0]}"
+	else
+		printf '%s\n' "${array[*]}"
+	fi
+}
+
+has_migrants() {
+	arguments: $# none
+
+	[[ "$( get_hash 'current_local_positional_dictionary' 'meta:has_migrants' 'STRICT' )" == "$boolean_string_true" ]]
+}
+
+get_current_migrants_list() {
+	arguments: $# none
+
+	get_hash 'current_local_positional_dictionary' 'meta:migrants_list' 'STRICT'
+}
+
+is_algo_default() {
+	#
+	# Usage: is_algo_default 'time_of_day' 'algo'
+	#
+	arguments: $# exactly 2
+
+	# consts
+
+	local -r requested_time_of_day="$1"
+	local -r requested_algo="$2"
+
+	[[ "$( get_hash 'current_local_positional_dictionary' "oc.${requested_time_of_day}.${requested_algo}:source" 'STRICT' )" == 'default' ]]
+}
+
+get_current_oc_string_by() {
+	#
+	# get_hash() wrapper to read O/C strings from current_local_positional_dictionary[]
+	#
+	# Usage: get_current_oc_string_by 'time_of_day' 'algo' 'oc_entity'
+	#
+	# If such entity does not exist, die.
+	#
+	arguments: $# exactly 3
+
+	# consts
+
+	local -r requested_time_of_day="$1"
+	local -r requested_algo="$2"
+	local -r requested_oc_entity="$3"
+
+	# code
+
+	get_hash 'current_local_positional_dictionary' "oc.${requested_time_of_day}.${requested_algo}:${requested_oc_entity}" 'STRICT'
+}
+
+get_initial_oc_string_by() {
+	#
+	# get_hash() wrapper to read O/C strings from initial_global_positional_dictionary[]
+	#
+	# Usage: get_initial_oc_string_by 'rig' 'time_of_day' 'algo' 'oc_entity'
+	#
+	# If such algo does not exist, fallback to 'default' algo.
+	# Moreover, if 'default' algo does not exist, return '0' and set exit code to false
+	#
+	arguments: $# exactly 4
+
+	# consts
+
+	local -r requested_rig="$1"
+	local -r requested_time_of_day="$2"
+	local -r requested_algo="$3"
+	local -r requested_oc_entity="$4"
+
+	local -r requested_key="${requested_rig}.oc.${requested_time_of_day}.${requested_algo}:${requested_oc_entity}"
+	local -r fallback_key="${requested_rig}.oc.${requested_time_of_day}.default:${requested_oc_entity}"
+
+	# vars
+
+	local oc_entity_string=''
+	local get_initial_oc_SUCCESS="$boolean_bash_false" # default exit code
+
+	# code
+
+	oc_entity_string="$( get_hash 'initial_global_positional_dictionary' "$requested_key" 'ASIS' )" # return empty string if the key not exist
+
+	# that entity, does it exist?
+	if is_variable_empty "$oc_entity_string"; then
+		# no, it doesn't. try to fallback to default value:
+		oc_entity_string="$( get_hash 'initial_global_positional_dictionary' "$fallback_key" 'ASIS' )" # return empty string if the key not exist
+		# still doesn't exist?
+		if is_variable_empty "$oc_entity_string"; then
+			# give up, set to mother-of-all-defaults: 0
+			oc_entity_string='0'
+		fi
+	else
+		get_initial_oc_SUCCESS="$boolean_bash_true"
+	fi
+
+	printf '%s\n' "$oc_entity_string"
+	return "$get_initial_oc_SUCCESS"
+}
+
+update_current_local_positional_dictionary_with_oc() {
+	#
+	# Translate O/C strings from initial_global_positional_dictionary[] to current_local_positional_dictionary[] by 'meta:migrants_list' key
+	#
+	# Usage: update_current_local_positional_dictionary_with_oc
+	#
+	# O/C strings are: core_clock, mem_clock, fan_speed, power_limit.
+	# [[ meta:has_migrants == 'true' ]] && translate || copy
+	#
+	arguments: $# none
+
+	# consts
+
+	local -r local_rig="$HOSTNAME"
+	#s hellcheck disable=SC2119
+	local -r -a migrants_list=( $( get_current_migrants_list ) )
+	local -r -i local_gpu_count="${#migrants_list[@]}"
+	local -r message='Generating all local O/Cs according to migration list...'
+
+	# vars
+
+	local time_of_day=''
+	local algo=''
+	local oc_entity=''
+	local -i local_gpu_iterator=0
+	local -i entities_counter=0
+	local -i entities_total_count=0
+
+	local -a oc_input_array=()
+	local -a oc_output_array=()
+	local oc_value=''
+	local oc_input_string=''
+	#local oc_output_string=''
+
+	local desired_rig_and_position=''
+	local desired_rig=''
+	local desired_position=''
+
+	# flasg
+
+	local -i key_exist_in_initial_OC_template="$boolean_c_true"
+
+	# code
+
+	(( entities_total_count = ${#time_of_day_list[@]} * ${#algo_list[@]} * ${#oc_entity_list[@]} ))
+
+	printf '%s' "$message"
+
+	for time_of_day in "${time_of_day_list[@]}"; do
+		for algo in "${algo_list[@]}"; do
+			for oc_entity in "${oc_entity_list[@]}"; do
+
+				(( entities_counter++ ))
+
+				if { has_migrants; }; then
+					# compose the 'oc_output_array' field by field. SLOW.
+					for (( local_gpu_iterator=0; local_gpu_iterator < local_gpu_count; local_gpu_iterator++ )); do
+
+						desired_rig_and_position="${migrants_list[$local_gpu_iterator]}"
+
+						if [[ "$desired_rig_and_position" == "$not_migrant_attribute" ]]; then
+							desired_rig="$local_rig"
+							desired_position="$local_gpu_iterator"
+						else
+							desired_rig="$( get_field_from_string_by_delimiter 1 "$desired_rig_and_position" '.' )"
+							desired_position="$( get_field_from_string_by_delimiter 2 "$desired_rig_and_position" '.' )"
+						fi
+
+						oc_input_string="$( get_initial_oc_string_by "$desired_rig" "$time_of_day" "$algo" "$oc_entity" )"; grab_exit_code_to_c_boolean 'key_exist_in_initial_OC_template'
+						#oc_input_array=( $oc_input_string ) ### just for testing the printf down there
+						oc_value="$( get_field_by_index_from_oc_string "$desired_position" "$oc_input_string" )"
+						oc_output_array["$local_gpu_iterator"]="$oc_value"
+					done
+				else
+					# "simply" copy input to output. BLAZZING FAST.
+					oc_input_array=( $( get_initial_oc_string_by "$local_rig" "$time_of_day" "$algo" "$oc_entity" ) ); grab_exit_code_to_c_boolean 'key_exist_in_initial_OC_template'
+					if (( ${#oc_input_array[@]} == 1 )); then
+						# padding by the first element if only one element in input
+						for (( local_gpu_iterator=0; local_gpu_iterator < local_gpu_count; local_gpu_iterator++ )); do
+							oc_output_array["$local_gpu_iterator"]="${oc_input_array[0]}"
+						done
+					else
+						oc_output_array=( "${oc_input_array[@]:0:${local_gpu_count}}" ) # ":0:${local_gpu_count}": length of the output should match local_gpu_count
+					fi
+				fi
+
+				### testing
+				#printf ' oc_input_array: '
+				#printf "'%s' " "${oc_input_array[@]}"
+				#printf '\n'
+				#printf 'oc_output_array: '
+				#printf "'%s' " "${oc_output_array[@]}"
+				#printf '\n'
+
+				# flatten array to string and update dictionary
+				set_hash 'current_local_positional_dictionary' "oc.$time_of_day.$algo:$oc_entity" "${oc_output_array[*]}"
+
+				# have we the luxury of interactive terminal?
+				if [[ -t 1 ]]; then
+					printf '\r%s %u/%b%u%b done' "$message" "$(( entities_counter ))" "${OK_COLOR}" "$(( entities_total_count ))" "${NOCOLOR}"
+				fi
+
+			done
+			# set source for each algo
+			if (( key_exist_in_initial_OC_template )); then
+				set_hash 'current_local_positional_dictionary' "oc.$time_of_day.$algo:source" "$algo"
+			else
+				set_hash 'current_local_positional_dictionary' "oc.$time_of_day.$algo:source" 'default'
+			fi
+		done
+	done
+	readonly current_local_positional_dictionary # just to be safe
+
+	if [[ -t 1 ]]; then
+		printf '\r%s %b%u/%u done.%b\n' "$message" "${OK_COLOR}" "$(( entities_counter ))" "$(( entities_total_count ))" "${NOCOLOR}"
+	else
+		printf ' %b%u/%u done.%b\n' "${OK_COLOR}" "$(( entities_counter ))" "$(( entities_total_count ))" "${NOCOLOR}"
+	fi
+}
+
+print_string_as_indexed_array() {
+	#
+	# Usage: print_string_as_indexed_array x y z
+	# Usage: print_string_as_indexed_array 'x y z'
+	# Usage: print_string_as_indexed_array ${array[@]}
+	#
+	# Print input values separately, by IFS=' '. Prepend each element with grayed-out index.
+	#
+	arguments: $# atleast 1
+
+	# consts
+
+	local -r -a array=( $@ )
+	local -r -i array_length="${#array[@]}"
+
+	# vars
+
+	local -i iterator=0
+
+	# code
+
+	for (( iterator=0; iterator < array_length; iterator++ )); do
+		printf '%b[%u]%b %s' "${DIM_COLOR}" "$iterator" "${NOCOLOR}" "${array[$iterator]}"
+		if (( iterator < (array_length - 1) )); then
+			# add trailing ' ' while not last element
+			printf '  '
+		fi
+	done
+
+	printf '\n'
+}
+
+print_with_fixed_width() {
+	#
+	# Usage: print_with_fixed_width 'string_width' 'string'
+	#
+	# Print string with fixed width. If larger, pad with whitespaces. If lesser, crop.
+	#
+	# string_width > 0: left-pad
+	# string_width < 0: right-pad
+	#
+	# Warning: incorrect results on strings with ANSI-codes (it's printf problem)
+	#
+	arguments: $# exactly 2
+
+	# consts
+
+	local -r -i string_width="$1"
+	local -r string="$2"
+
+	# code
+
+	if (( string_width < 0 )); then
+		printf '%-*.*s' "${string_width#-}" "${string_width#-}" "$string"
+	else
+		printf '%*.*s' "$string_width" "$string_width" "$string"
+	fi
+}
+
+print_current_local_positional_dictionary() {
+	#
+	# Usage: print_current_local_positional_dictionary ['time_of_day' ['algo']]
+	#
+	# Arguments are filters. With args, prints values of the keys mentioned by args. Without args, prints whole branch -- day+night and all algos.
+	#
+	arguments: $# range 0 2
+
+	# consts
+
+	local -r local_rig="$HOSTNAME"
+	local -r -a _time_of_day_list=( "${1-${time_of_day_list[@]}}" ) # use $1 as a sole array element OR use pre-defined array if $1 is ommited
+	local -r -a _algo_list=( "${2-${algo_list[@]}}" ) # the same
+	local -r migrants_list_as_string="$( get_current_migrants_list )"
+
+	# vars
+
+	local time_of_day=''
+	local algo=''
+	local oc_entity=''
+
+	local initial_oc_entity_string=''
+	local current_oc_entity_string=''
+
+	local fan_string=''
+	local pretty_path=''
+	local -i changes_counter=0
+	local COLOR=''
+
+	# flags
+
+	local -i initial_and_current_entities_equal="$boolean_c_false"
+	local -i key_exist_in_initial_OC_template="$boolean_c_false"
+
+	# code
+
+	echo
+	echo -e -n "Updated O/C strings for ${BOLD_COLOR}${local_rig}${NOCOLOR}."
+	if { has_migrants; }; then
+		echo -e " Migrants: $( print_string_as_indexed_array "$migrants_list_as_string" )"
+	else
+		echo
+	fi
+	echo
+
+	for time_of_day in "${_time_of_day_list[@]}"; do
+		for algo in "${_algo_list[@]}"; do
+
+			fan_string="$( get_initial_oc_string_by "$local_rig" "$time_of_day" "$algo" 'fan_speed' )"; grab_exit_code_to_c_boolean 'key_exist_in_initial_OC_template'
+
+			if (( key_exist_in_initial_OC_template )); then
+				COLOR="${NOCOLOR}"
+			else
+				# no such algo defined
+				COLOR="${DIM_COLOR}"
+				###continue
+			fi
+
+			# check for FAN=71. '71' disables o/c permutations.
+			if [[ "$fan_string" == "$oc_disabled_attribute" ]]; then
+				printf '%s: ' "${local_rig}.${time_of_day}.${algo}"
+				print_message WARN 'O/C UUID management disabled for this entity\n'
+			fi
+
+			for oc_entity in "${oc_entity_list[@]}"; do
+
+				printf -v pretty_path "${COLOR}%s${DIM_COLOR}.${COLOR}%s${DIM_COLOR}.${COLOR}%s${DIM_COLOR}:${COLOR}%s" "$local_rig" "$time_of_day" "$algo" "$oc_entity"
+
+				foo="$( strip_ansi "$pretty_path" )"; (( bar = 36 - ${#foo} )) ### nigger rig
+				printf '%b%*.*s' "$pretty_path" "$bar" "$bar" ### nigger rig
+
+				# get initial & current O/C string
+				initial_oc_entity_string="$( get_initial_oc_string_by "$local_rig" "$time_of_day" "$algo" "$oc_entity" )"; grab_exit_code_to_c_boolean 'key_exist_in_initial_OC_template'
+				current_oc_entity_string="$( get_current_oc_string_by "$time_of_day" "$algo" "$oc_entity" | reduce_oc_string )" # ...then reduce like, '70 70 70' to mere '70'
+
+				# are they differ at first sight?
+				[[ "$current_oc_entity_string" == "$initial_oc_entity_string" ]]; grab_exit_code_to_c_boolean 'initial_and_current_entities_equal'
+
+				if (( initial_and_current_entities_equal )); then
+					# gray this out.
+					printf '   %b' "${DIM_COLOR}"
+				else
+					# the same not.
+					(( changes_counter++ ))
+					printf ' = '
+				fi
+
+				printf '%s ' "$current_oc_entity_string"
+
+				if (( key_exist_in_initial_OC_template )); then
+					print_message DIM "(was: $initial_oc_entity_string)\n"
+				else
+					print_message WARN '(key not found in the initial O/C template, value set to default algo)\n'
+				fi
+
+			done
+			printf '\n' # gap between the groups
+		done
+	done
+
+	if (( changes_counter )); then
+		printf 'Changes found: %u\n' "$changes_counter"
+	fi
+}
+
+print_horizontal_line() {
+	#
+	# Usage: print_horizontal_line 'line_length' ['line_char']
+	#
+	# Prints line like '--------------', get length from $1
+	#
+	arguments: $# range 1 2
+
+	# args
+
+	local -r -i line_length="$1"
+
+	local -r line_char_DEFAULT="${FRAME_HORIZONTAL_LINE}"
+	local -r line_char="${2-${line_char_DEFAULT}}"
+
+	# vars
+
+	local whitespaced_line=''
+
+	# code
+
+	printf -v whitespaced_line '%*s' "$line_length" ''
+	: "${whitespaced_line// /${line_char}}"
+	printf '%b%s%b' "${FRAME_COLOR}" "$_" "${NOCOLOR}"
+}
+
+print_horizontal_line_with_header() {
+	#
+	# Usage: print_horizontal_line_with_header 'header_text' 'header_length'
+	#
+	# Prints header like '===[ text ]===================================='
+	#
+	arguments: $# exactly 2
+
+	# args
+
+	local -r header_text="$1"
+	local -r -i header_length="$2"
+
+	# consts
+
+	local -r line_char='='
+	local -r -i pre_label_length=3
+	local -r -i label_length=$(( ${#header_text} + 4 )) # '[  ]'
+	local -r -i post_label_length=$(( header_length - label_length - pre_label_length ))
+
+	# vars
+
+	local whole_string=''
+
+	# code
+
+	whole_string="$( print_horizontal_line "$pre_label_length" "$line_char" )"
+	whole_string+="${FRAME_COLOR}[${NOCOLOR} $header_text ${FRAME_COLOR}]${NOCOLOR}"
+	whole_string+="$( print_horizontal_line "$post_label_length" "$line_char" )"
+
+	printf '%b\n' "$whole_string"
+}
+
+print_divider_if_arguments_not_equal() {
+	arguments: $# exactly 2
+
+	# consts
+
+	local -r argument1="${1-}"
+	local -r argument2="${2-}"
+	local -r divider=" ${FRAME_COLOR}${FRAME_VERTICAL_LINE}${NOCOLOR}"
+	local -r no_divider="${NOCOLOR}  "
+
+	# code
+
+	if [[ "$argument1" != "$argument2" ]]; then
+		# not equal
+		printf '%b' "$divider"
+	else
+		# equal
+		printf '%b' "$no_divider"
+	fi
+}
+
+print_divider_if_argument_not_empty() {
+	#
+	# looks like not used
+	#
+	arguments: $# exactly 1
+
+	# consts
+
+	local -r argument="${1-}"
+	local -r divider=" ${FRAME_COLOR}${FRAME_HORIZONTAL_LINE}${NOCOLOR}"
+	local -r no_divider="${NOCOLOR}  "
+
+	# code
+
+	if [[ -n "$argument" ]]; then
+		# not empty
+		printf '%b' "$divider"
+	else
+		# empty
+		printf '%b' "$no_divider"
+	fi
+}
+
+print_table_header() {
+	#
+	# Prints current GPU indices and mirgants as a header.
+	#
+	arguments: $# none
+
+	# consts
+
+	local -r -a migrants_list=( $( get_current_migrants_list ) )
+	local -r -i local_gpu_count="${#migrants_list[@]}"
+
+	# vars
+
+	local -i current_gpu_number=0
+
+	# code
+
+	print_with_fixed_width "$TABLE_DESCRIPTION_WIDTH" 'gpu#'
+	print_divider_if_arguments_not_equal "${migrants_list[0]-${not_migrant_attribute}}" "${migrants_list[1]-${not_migrant_attribute}}"
+	for (( current_gpu_number=0; current_gpu_number < local_gpu_count; current_gpu_number++ )); do
+		print_with_fixed_width "$TABLE_NUMBER_WIDTH" "$current_gpu_number"
+		print_divider_if_arguments_not_equal "${migrants_list[current_gpu_number]-${not_migrant_attribute}}" "${migrants_list[current_gpu_number+1]-${not_migrant_attribute}}"
+	done
+	printf '\n'
+
+	if { has_migrants; }; then
+		print_with_fixed_width "$TABLE_DESCRIPTION_WIDTH" 'migrants'
+		print_divider_if_arguments_not_equal "${migrants_list[0]-${not_migrant_attribute}}" "${migrants_list[1]-${not_migrant_attribute}}"
+		for (( current_gpu_number=0; current_gpu_number < local_gpu_count; current_gpu_number++ )); do
+			printf '%b' "${INFO_COLOR}"
+			print_with_fixed_width "$TABLE_NUMBER_WIDTH" "${migrants_list[current_gpu_number]/${not_migrant_attribute}/ }" # some aesthetics: replace '-' with whitespace
+			print_divider_if_arguments_not_equal "${migrants_list[current_gpu_number]-${not_migrant_attribute}}" "${migrants_list[current_gpu_number+1]-${not_migrant_attribute}}"
+		done
+		printf '\n'
+	fi
+
+	# draw a divider line
+	print_horizontal_line "$(( TABLE_DESCRIPTION_WIDTH + ( ${#migrants_list[@]} * (TABLE_NUMBER_WIDTH+2) ) ))"
+	printf '\n'
+}
+
+
+#
+# Operations on the current state
+#
+
+get_current_fs_name() {
+	arguments: $# none
+
+	# consts
+
+	local -r conf='/hive-config/wallet.conf'
+
+	# vars
+
+	local raw_header=''
+	local fs_name=''
+
+	# code
+
+	readonly raw_header="$( head --lines=1 "$conf" )"
+	readonly fs_name="$( get_field_from_string_by_delimiter 2 "$raw_header" '"' )"
+
+	printf '%s\n' "$fs_name"
+}
+
+get_current_oc_algo() {
+	arguments: $# none
+
+	# consts
+
+	local -r oc_algo_DEFAULT='default'
+
+	# vars
+
+	local fs_name=''
+	local tmp_fs_name=''
+	local oc_algo=''
+
+	# code
+
+	tmp_fs_name="$( get_current_fs_name )"
+
+	# in case Autoswitch turned off ('-Autoswitch nnn'), skip 1st char
+	if [[ "${tmp_fs_name:1:11}" == 'Autoswitch ' ]]; then
+		tmp_fs_name="${tmp_fs_name:1}"
+	fi
+
+	# in case Nicehash NEW platform ('Autoswitch New nnn'), cut the 'New'
+	if [[ "${tmp_fs_name:10:5}" == ' New ' ]]; then
+		tmp_fs_name="${tmp_fs_name/New }"
+	fi
+
+	fs_name="$tmp_fs_name"
+
+	# get value from hash table. if empty (which means 'not in dictionary'), set to 'default'
+	oc_algo="${fs_algo_to_oc_algo_dictionary[$fs_name]:-${oc_algo_DEFAULT}}"
+
+	printf '%s\n' "$oc_algo"
+}
+
+get_current_time_of_day() {
+	arguments: $# none
+
+	# consts
+
+	local -r conf='/hive-config/autoswitch.conf'
+	local -r time_of_day_DEFAULT='<undefined>'
+
+	# vars
+
+	local time_of_day=''
+
+	# code
+
+	time_of_day="$( source "$conf"; echo "${time_of_day-${time_of_day_DEFAULT}}" )"
+
+	printf '%s\n' "$time_of_day"
+}
+
+print_two_arrays_vertically() {
+	#
+	# Usage: print_two_arrays_vertically 'array1_reference' 'array2_reference' ['array1_description' ['array2_description']]
+	#
+	arguments: $# range 2 4
+
+	# consts
+
+	local -r array1_name="$1"
+	local -r array2_name="$2"
+	local -r array1_description="${3-$array1_name}"
+	local -r array2_description="${4-$array2_name}"
+	local -r -n array1="$array1_name"
+	local -r -n array2="$array2_name"
+
+	local -r -a migrants_list=( $( get_current_migrants_list ) )
+	local -r out_of_index_symbol='-'
+
+	# vars
+
+	local -i position_iterator=0
+	local -i max_position=0
+	local current_array_description=''
+
+	# flags
+
+	local -i no_mismatches="$boolean_c_true"
+
+	# code
+
+	# are arrays equal in length?
+	if { are_two_arrays_identical 'array1' 'array2'; }; then
+		no_mismatches="$boolean_c_true"
+		max_position="${#array1[@]}"
+	else
+		no_mismatches="$boolean_c_false"
+		max_position="$( math::max_of_two_integers "${#array1[@]}" "${#array2[@]}" )"
+	fi
+
+	# print the 1st array
+
+	current_array_description="$array1_description"
+
+#	printf '%b' "${LGRAY}" # 1st array color
+	print_with_fixed_width "$TABLE_DESCRIPTION_WIDTH" "$current_array_description"
+#	printf '%b' "${NOCOLOR}"
+	print_divider_if_arguments_not_equal "${migrants_list[0]-${not_migrant_attribute}}" "${migrants_list[1]-${not_migrant_attribute}}"
+
+	for (( position_iterator=0; position_iterator < max_position; position_iterator++ )); do
+#		# why {-a} and {-b}: we need to highlight (array1[]=unset and array2[]=unset) situations
+#		if [[ "${array1[$position_iterator]-a}" == "${array2[position_iterator]-b}" ]]; then
+#			printf '%b' "${LGRAY}"
+#		else
+#			printf '%b' "${LGRAY}"
+#		fi
+		print_with_fixed_width "$TABLE_NUMBER_WIDTH" "${array1[$position_iterator]-${out_of_index_symbol}}" # '-' for out-of-index values
+#		printf '%b' "${NOCOLOR}"
+		print_divider_if_arguments_not_equal "${migrants_list[position_iterator]-${not_migrant_attribute}}" "${migrants_list[position_iterator+1]-${not_migrant_attribute}}"
+	done
+
+	printf '\n'
+
+	# print the 2nd array in gray
+
+	# array1 ≠ array2?
+	if (( no_mismatches )); then
+		current_array_description="$array2_description"
+	else
+		current_array_description="<> $array2_description" # add not_equal_sign to array description
+	fi
+
+	printf '%b' "${DIM_COLOR}" # 2nd array color
+	print_with_fixed_width "$TABLE_DESCRIPTION_WIDTH" "$current_array_description"
+	printf '%b' "${NOCOLOR}"
+	print_divider_if_arguments_not_equal "${migrants_list[0]-${not_migrant_attribute}}" "${migrants_list[1]-${not_migrant_attribute}}"
+
+	for (( position_iterator=0; position_iterator < max_position; position_iterator++ )); do
+		# why {-a} and {-b}: we need to highlight (array1[]=unset and array2[]=unset) situations
+		if [[ "${array1[$position_iterator]-a}" == "${array2[position_iterator]-b}" ]]; then
+			printf '%b' "${DIM_COLOR}"
+		else
+			printf '%b' "${DIFFERENCE_COLOR}"
+		fi
+		print_with_fixed_width "$TABLE_NUMBER_WIDTH" "${array2[$position_iterator]-${out_of_index_symbol}}" # '-' for out-of-index values
+		printf '%b' "${NOCOLOR}"
+		print_divider_if_arguments_not_equal "${migrants_list[position_iterator]-${not_migrant_attribute}}" "${migrants_list[position_iterator+1]-${not_migrant_attribute}}"
+	done
+
+	printf '\n'
+}
+
+set_and_print_parent_oc_variables() {
+	arguments: $# none
+
+	# consts
+
+	local -r current_time_of_day="$( get_current_time_of_day )"
+	local -r current_oc_algo="$( get_current_oc_algo )"
+
+	# vars
+
+	local -i oc_entity_iterator=0
+	local -a oc_entity_array=()
+	local oc_entity=''
+
+	local parent_oc_entity=''
+	local -n parent_oc_entity_array
+
+	# code
+
+	echo -e "Setting 'nvidia-oc' private arrays $( printf '%s[] ' "${parent_oc_entity_list[@]}" )for ${BOLD_COLOR}${current_oc_algo}${NOCOLOR} @ ${BOLD_COLOR}${current_time_of_day}${NOCOLOR}..."
+	if [[ "$current_oc_algo" != 'default' ]] && { is_algo_default "$current_time_of_day" "$current_oc_algo"; }; then
+		print_message INFO "O/C values for that algo are not found. Actually, 'default' algo used.\n"
+	fi
+	echo
+
+	print_table_header
+
+	# for each O/C entity
+	for (( oc_entity_iterator=0; oc_entity_iterator < "${#oc_entity_list[@]}"; oc_entity_iterator++ )); do
+		oc_entity="${oc_entity_list[$oc_entity_iterator]}" # f.e. 'oc_entity=mem_clock'
+		oc_entity_array=( $( get_current_oc_string_by "$current_time_of_day" "$current_oc_algo" "$oc_entity" ) )
+
+		# get entity name
+		parent_oc_entity="${parent_oc_entity_list[$oc_entity_iterator]}" # f.e. 'parent_oc_entity=MEM'
+		# make reference with that name
+		local -n parent_oc_entity_array="$parent_oc_entity"
+
+		print_two_arrays_vertically 'oc_entity_array' 'parent_oc_entity_array' "$oc_entity" "$parent_oc_entity"
+
+		# shellcheck disable=SC2034
+		parent_oc_entity_array=( ${oc_entity_array[@]} ) # assign OUR value
+	done
+}
+
+
+#
+# History: load caches, compare, save
+#
+
+load_dictionary_from_cache_as_custom_name() {
+	#
+	# Usage: load_dictionary_from_cache_as_custom_name 'dictionary_name' 'cache_file_name' 'custom_name'
+	#
+	arguments: $# exactly 3
+
+	# consts
+
+	local -r dictionary_name="$1"
+	local -r cache_file_name="$2"
+	local -r custom_name="$3"
+
+	# vars
+
+	local dictionary_as_text=''
+
+	# code
+
+	if is_file_exist "$cache_file_name"; then
+		dictionary_as_text=$(
+			printf '#' # comment out load_dictionaries_from_cache() message
+			load_dictionaries_from_cache "$cache_file_name"
+			print_array "$dictionary_name" "$custom_name"
+		)
+		declare -g -A "$custom_name=()"
+		source <(printf '%s' "$dictionary_as_text")
+	else
+		_error_message "File not found: $cache_file_name" "$@"
+		return "$boolean_bash_false"
+	fi
+}
+
+get_CRUD_status_by_magic() {
+	arguments: $# exactly 2
+
+	# consts
+
+	local -r -i old_indices_count="$1"
+	local -r -i new_indices_count="$2"
+
+	# vars
+
+	local CRUD_status=''
+
+	# code
+
+	if (( old_indices_count > 0 && new_indices_count > 0 )); then
+		CRUD_status='Updated'
+	elif (( old_indices_count == 0 && new_indices_count > 0 )); then
+		CRUD_status='Created'
+	elif (( old_indices_count > 0 && new_indices_count == 0 )); then
+		CRUD_status='Deleted'
+	else
+		CRUD_status='<undef>'
+	fi
+
+	printf '%s\n' "$CRUD_status"
+}
+
+print_numbered_string() {
+	local -r -i indices_count="$1"
+	local -r -a indices_to_mark=( ${@:2} )
+
+	local -i index=0
+	local numbered_string=''
+
+	for (( index=0; index < indices_count; index++ )); do
+		if is_item_in_list "$index" "${indices_to_mark[@]}"; then
+			numbered_string+="${index: -1:1}" # last digit from number, 11=1 12=2
+		else
+			numbered_string+='-'
+		fi
+	done
+
+	printf '%s\n' "$numbered_string"
+}
+
+print_differencies_between_two_oc_strings_with_format() {
+	#
+	# Usage: print_differencies_between_two_oc_strings_with_format 'old_oc_string' 'new_oc_string' 'output_format=INTEGRAL|PER_GPU'
+	#
+	arguments: $# range 2 3
+
+	# args
+
+	local -r -a old_oc_array=( $1 )
+	local -r -a new_oc_array=( $2 )
+	local -r output_format_DEFAULT='INTEGRAL' # INTEGRAL|PER_GPU
+	local -r output_format="${3-${output_format_DEFAULT}}"
+
+	# consts
+
+	local -r -i max_gpu_index="$( math::max_of_two_integers "${#old_oc_array[@]}" "${#new_oc_array[@]}" )"
+	local -r change_pattern='[()]'
+
+	# vars
+
+	local -a -i list_of_different_indices=()
+	local -i gpu_index=0
+	local CRUD_status=''
+	local -a result_oc_array=()
+	local result_brief=''
+	local old_oc_value=''
+
+	# code
+
+	CRUD_status="$( get_CRUD_status_by_magic "${#old_oc_array[@]}" "${#new_oc_array[@]}" )"
+
+	case "$CRUD_status" in
+		'Updated')
+			for (( gpu_index=0; gpu_index < max_gpu_index; gpu_index++ )); do
+				# put a 'new' value to the result array
+				result_oc_array[$gpu_index]="${new_oc_array[$gpu_index]}"
+
+				# are the old and the new not identical? then we need to set an old value
+				if [[ "${old_oc_array[$gpu_index]-a}" != "${new_oc_array[$gpu_index]-b}" ]]; then
+					if is_variable_empty "${old_oc_array[$gpu_index]-}"; then
+						# old value not found
+						printf -v old_oc_value '(-)'
+					else
+						# old value found
+						printf -v old_oc_value '(%s%+d)' "${old_oc_array[$gpu_index]}" "$(( ${new_oc_array[$gpu_index]} - ${old_oc_array[$gpu_index]} ))"
+					fi
+
+					# add an 'old' value to the result array. it's just like (-) or (1234-1)
+					result_oc_array[$gpu_index]+="$old_oc_value"
+					list_of_different_indices+=( "$gpu_index" )
+				fi
+			done
+			;;
+		'Created')
+			result_oc_array=( $( printf '%d(-)\n' "${new_oc_array[@]}" ) ) #'#mcedit syntax highlighting fix
+			;;
+		'Deleted')
+			result_oc_array=( $( printf '-(%d)\n' "${old_oc_array[@]}" ) ) #'#mcedit syntax highlighting fix
+			;;
+		*)
+			_die 'wtf?' "$@"
+			;;
+	esac
+
+	case "$output_format" in
+		'INTEGRAL')
+			if (( ${#list_of_different_indices[@]} > 0 )); then
+				result_brief="$( print_numbered_string "$max_gpu_index" "${list_of_different_indices[@]}" )"
+				result_brief="$( print_with_fixed_width -12 "$result_brief" ) "
+			else
+				result_brief='             '
+			fi
+			printf "%s %s%s\n" "$CRUD_status" "$result_brief" "${result_oc_array[*]}"
+			;;
+		'PER_GPU')
+			for (( gpu_index=0; gpu_index < max_gpu_index; gpu_index++ )); do
+				if [[ ${result_oc_array[gpu_index]} =~ $change_pattern ]]; then
+					printf '%u %s\n' "$gpu_index" "${result_oc_array[gpu_index]}"
+				fi
+			done
+			;;
+	esac
+}
+
+get_cache_creation_date_in_seconds() {
+	arguments: $# exactly 1
+
+	# args
+
+	local -r cache_file_name="$1"
+
+	# consts
+
+	local -r grep_pattern='[Gg]enerated by script '
+	local -r split_pattern="' at "
+
+	# vars
+
+	local line_with_pattern=''
+	local date_string=''
+	local -i date_in_seconds=0
+
+	# flags
+
+	local -i pattern_exist
+	local -i date_exist
+
+	# code
+
+	line_with_pattern="$( grep --directories=skip "$grep_pattern" "$cache_file_name" )"
+	grab_exit_code_to_c_boolean 'pattern_exist'
+
+	if (( pattern_exist )); then
+		date_string="$( get_field_from_string_by_delimiter 2 "$line_with_pattern" "$split_pattern" )"
+		grab_exit_code_to_c_boolean 'date_exist'
+
+		if (( date_exist )); then
+			date_in_seconds="$( date --date="$date_string" +%s )"
+		fi
+	fi
+
+	printf '%u\n' "$date_in_seconds"
+
+	(( pattern_exist && date_exist ))
+}
+
+compare_two_caches_to_file_with_format() {
+	#
+	# Usage: compare_two_caches_to_file_with_format 'old_cache_file_name' 'new_cache_file_name' 'history_file_name' 'history_format'
+	#
+	arguments: $# range 2 4
+
+	# args
+
+	local -r old_cache_file_name="$1"
+	local -r new_cache_file_name="$2"
+	local -r history_file_name_DEFAULT='/dev/stdout'
+	local -r history_file_name="${3:-${history_file_name_DEFAULT}}"
+	local -r history_format_DEFAULT='INTEGRAL' # INTEGRAL|PER_GPU
+	local -r history_format="${4-${history_format_DEFAULT}}"
+
+	# vars
+
+	local -a old_dictionary_keys=()
+	local -a new_dictionary_keys=()
+	local -a unique_keys=()
+
+	local -i old_cache_date_in_seconds=0
+	local -i new_cache_date_in_seconds=0
+	local -i caches_date_diff_in_seconds=0
+
+	local old_cache_date_string=''
+	local new_cache_date_string=''
+	local key=''
+
+	local differencies_string=''
+	local -a differencies_array=()
+	local rig=''
+	local oc_entity=''
+	local gpu_composite_reading=''
+	local -i gpu_number=0
+	local gpu_reading=''
+
+	# code
+
+	printf 'Comparing %s and %s...' "${old_cache_file_name}" "${new_cache_file_name}"
+
+	# load old and new dictionaries to arrays
+
+	printf ' Loading old...'
+	if ! { load_dictionary_from_cache_as_custom_name 'initial_global_positional_dictionary' "$old_cache_file_name" 'old_dictionary'; }; then
+		print_message ERR ' Error.\n'
+		return "$boolean_bash_false"
+	fi
+
+	printf ' Loading new...'
+	if ! { load_dictionary_from_cache_as_custom_name 'initial_global_positional_dictionary' "$new_cache_file_name" 'new_dictionary'; }; then
+		print_message ERR ' Error.\n'
+		return "$boolean_bash_false"
+	fi
+
+	# dictionaries loaded. it's time for some checks:
+
+	#1 check them for similarity and don't process identical ones further
+
+	if { are_two_arrays_identical 'old_dictionary' 'new_dictionary'; }; then
+		print_message INFO ' Identical. Skipped.\n'
+		return
+	fi
+
+	#2 check them for embedded date string
+
+	if ! { old_cache_date_in_seconds=$( get_cache_creation_date_in_seconds "$old_cache_file_name" ); }; then
+		print_message ERR ' Date not found in the old. Skipped.\n'
+		return
+	fi
+
+	if ! { new_cache_date_in_seconds=$( get_cache_creation_date_in_seconds "$new_cache_file_name" ); }; then
+		print_message ERR ' Date not found in the new. Skipped.\n'
+		return
+	fi
+
+	# all is good.
+	# populate *_keys arrays with keys: old, new and unique (unique = old JOIN new)
+
+	split_string_to_array_by_delimiter "$( printf '%s\n' "${!old_dictionary[@]}" | sort --sort=version )" 'old_dictionary_keys' $'\n'
+	split_string_to_array_by_delimiter "$( printf '%s\n' "${!new_dictionary[@]}" | sort --sort=version )" 'new_dictionary_keys' $'\n'
+	split_string_to_array_by_delimiter "$( printf '%s\n' "${!new_dictionary[@]}" "${!old_dictionary[@]}" | sort --sort=version --unique )" 'unique_keys' $'\n'
+
+	printf ' Processing...'
+
+	# all output goes to $history_file_name
+	{
+		# calculate dates
+		old_cache_date_string="$( time::get_date_with_format "$old_cache_date_in_seconds" )"
+		new_cache_date_string="$( time::get_date_with_format "$new_cache_date_in_seconds" )"
+		caches_date_diff_in_seconds=$(( new_cache_date_in_seconds - old_cache_date_in_seconds ))
+
+		# compose header for INTEGRAL format
+		if [[ "$history_format" == 'INTEGRAL' ]]; then
+			printf '### %s -> %s\n' "$old_cache_date_string" "$new_cache_date_string"
+			printf '### keys %u/%u' "${#old_dictionary_keys[@]}" "${#new_dictionary_keys[@]}"
+			if (( ${#old_dictionary_keys[@]} != ${#new_dictionary_keys[@]} )); then
+				printf ' (diff=%d)' "$(( ${#new_dictionary_keys[@]} - ${#old_dictionary_keys[@]} ))"
+			fi
+			printf ', %s passed' "$( time::seconds2dhms "$caches_date_diff_in_seconds" )"
+			if (( caches_date_diff_in_seconds < 0 )); then
+				errcho " (WARNING: the 'new' is older than the 'old'!)"
+				printf " (WARNING: the 'new' is older than the 'old'!)"
+			fi
+			printf '\n'
+		fi
+
+		# compose lines, one key per line
+		for key in "${unique_keys[@]}"; do
+			if [[ "${old_dictionary["$key"]-}" != "${new_dictionary["$key"]-}" ]]; then
+				if [[ "$history_format" == 'INTEGRAL' ]]; then
+					print_with_fixed_width -38 "$key"
+					printf ' '
+					print_differencies_between_two_oc_strings_with_format "${old_dictionary["$key"]-}" "${new_dictionary["$key"]-}" 'INTEGRAL'
+				else
+					rig="$( get_field_from_string_by_delimiter 1 "$key" '.' )"
+					oc_entity="${key:7}"
+					differencies_string="$( print_differencies_between_two_oc_strings_with_format "${old_dictionary["$key"]-}" "${new_dictionary["$key"]-}" 'PER_GPU' )"
+					split_string_to_array_by_delimiter "$differencies_string" 'differencies_array' $'\n'
+					for gpu_composite_reading in "${differencies_array[@]}"; do
+						gpu_number="$( get_field_from_string_by_delimiter 1 "$gpu_composite_reading" )"
+						gpu_reading="$( get_field_from_string_by_delimiter 2 "$gpu_composite_reading" )"
+						# date time rig.gpu oc_entity=gpu_reading
+						printf '%s %s.%s %s=%s\n' "$new_cache_date_string" "$rig" "$gpu_number" "$oc_entity" "$gpu_reading"
+					done
+				fi
+			fi
+		done #| sort --key=1.40,1.46 --key=1.1,1.39
+
+		if [[ "$history_format" == 'INTEGRAL' ]]; then
+			printf '\n'
+		fi
+
+	} >> "$history_file_name"
+	
+	print_message OK ' Done.\n'
+}
+
+make_complete_history_from_all_caches() {
+	arguments: $# none
+
+	# consts
+
+	local -r files_to_process='./ren_caches/oc-by-uuid.cache.*'
+	local -r local_history_file="$history_file.gpu"
+
+	# vars
+
+	local file=''
+	local -a caches_to_process=()
+	local -i position=0
+	local old_cache_file_name=''
+	local new_cache_file_name=''
+
+	# code
+
+	# fill array with filenames, from old to new (due to fies naming convention)
+	for file in $files_to_process; do
+		caches_to_process+=( "$file" )
+	done
+
+	rotate_file "$local_history_file"
+
+	for (( position=0; position < (${#caches_to_process[@]} - 1); position++ )); do
+		old_cache_file_name="${caches_to_process[position]}"
+		new_cache_file_name="${caches_to_process[position + 1]}"
+		compare_two_caches_to_file_with_format "$old_cache_file_name" "$new_cache_file_name" "$local_history_file" 'INTEGRAL'
+	done
+}
+
+
+#
+# main
+#
+
+init_base_data_structures
+
+if { is_sourced; }; then
+	printf '\n'
+	print_horizontal_line_with_header 'INJECTION BEGIN' 105
+	printf '\n'
+fi
+
+print_script_version
+
+# check if we're sourced
+if { is_sourced; }; then
+	# now look at the first element of the FAN
+	if [[ "${FAN[0]}" != "$oc_disabled_attribute" ]]; then
+		extended_oc_management_enabled="$boolean_c_true"
+		print_message INFO "O/C UUID management is ON (FAN is '${FAN[0]}'). Set the first FAN value in the HiveOS O/C template to '$oc_disabled_attribute' to turn OFF.\n"
+	else
+		extended_oc_management_enabled="$boolean_c_false"
+		print_message INFO "O/C UUID management is OFF (FAN is '${FAN[0]}'). Set the first FAN value in the HiveOS O/C template to anything but '$oc_disabled_attribute' to turn ON.\n"
+	fi
+else
+	# check args
+	case "${1-}" in
+		'refresh'|'r')
+			forcibly_refresh_cache="$boolean_c_true"
+			;;
+		'fullhistory'|'f')
+			make_complete_history_from_all_caches ###
+			exit
+			;;
+		'')
+			:
+			;;
+		*)
+			print_script_usage
+			exit "$boolean_bash_false"
+			;;
+	esac
+fi
+
+if (( forcibly_refresh_cache )) || ! { load_dictionaries_from_cache "$permanent_cache_file" 'permanent'; }; then
+	forcibly_refresh_cache="$boolean_c_true"
+	populate_initial_global_positional_dictionary
+	rotate_file "$permanent_cache_file"
+	save_dictionaries_to_cache "$permanent_cache_file" 'initial_global_positional_dictionary'
+fi
+
+if (( extended_oc_management_enabled )); then
+	if (( forcibly_refresh_cache )) || ! { load_dictionaries_from_cache "$session_cache_file" 'session'; }; then
+		if { populate_local_index_to_uuid_dictionary; }; then # process if any GPU found
+			populate_current_local_positional_dictionary_with_locations
+			update_current_local_positional_dictionary_with_oc
+			save_dictionaries_to_cache "$session_cache_file" 'current_local_positional_dictionary'
+		else
+			print_message ERR 'No GPU found.\n'
+		fi
+	fi
+	if { is_sourced; }; then
+		set_and_print_parent_oc_variables
+		printf '\n'
+		print_horizontal_line_with_header 'INJECTION END' 105
+	else
+###		set_and_print_parent_oc_variables ### just for test
+		print_current_local_positional_dictionary
+	fi
+fi
+
+# for dumb HiveOS devs
+set +o nounset
+
+#
+# The end
+#
+
+
+#
+# Obsolete functions
+#
+
+#print_global_oc_as_csv() {
+#	arguments: $# none
+#
+#	# vars
+#
+#	local -i ok_records='0'
+#	local -i error_records='0'
+#	local -i total_records_processed='0'
+#	local -a error_list=()
+#	local all_variables_processed=''
+#
+#	local rig=''
+#	local time_of_day=''
+#	local algo=''
+#	local oc_entity=''
+#
+#	local hash_index=''
+#	local hash_key=''
+#
+#	# code
+#
+#	# put csv header with metadata
+#	printf 'sep=,\n\n'
+#	printf 'rig,time of day,algo'
+#	printf ',%s' "${oc_entity_list[@]}"
+#	printf '\n'
+#
+#	# The Great Loops
+#	for rig in "${rig_list[@]}"; do
+#		for time_of_day in "${time_of_day_list[@]}"; do
+#			for algo in "${algo_list[@]}"; do
+#
+#				printf '%s,%s,%s' "$rig" "$time_of_day" "$algo"
+#
+#				for oc_entity in "${oc_entity_list[@]}"; do
+#
+#					hash_index="$rig.oc.$time_of_day.$algo:$oc_entity"
+#
+#					if [ -z "${global_positional_dictionary[$hash_index]}" ]; then
+#						error_list+=("$hash_index")
+#						printf ',' # oops, empty value
+#					else
+#						((ok_records++))
+#						printf ',"%s"' "${global_positional_dictionary[$hash_index]}"
+#					fi
+#
+#					all_variables_processed+="global_positional_dictionary[\"$hash_index\"]=\"${global_positional_dictionary[$hash_index]}\""$'\n' # stash it for a sanity check
+#
+#				done
+#				echo
+#			done
+#			echo # grouping for better readability
+#		done
+#	done
+#
+#	readonly error_records="${#error_list[@]}" # just to be safe
+#	readonly total_records_processed="$(( ok_records + error_records ))" # just to be safe
+#
+#	if [[ $error_records -ne 0 || $total_records_processed -ne "${#global_positional_dictionary[@]}" ]]; then
+#		{
+#			printf 'WARNING: global_positional_dictionary["%s"] not found\n' "${error_list[@]}"
+#			printf 'SUMMARY: ok_records=%u, error_records=%u, total=%u. Original dictionary size is %u. Diff:\n' "$ok_records" "$error_records" "$total_records_processed" "${#global_positional_dictionary[@]}"
+#			diff <(
+#					for hash_key in "${!global_positional_dictionary[@]}"; do
+#						printf 'global_positional_dictionary["%s"]="%s"\n' "$hash_key" "${global_positional_dictionary[$hash_key]}"
+#					done | sort
+#				) <(
+#					printf '%s' "$all_variables_processed" | sort
+#				)
+#		} 1>&2
+#	fi
+#}

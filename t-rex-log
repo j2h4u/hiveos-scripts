@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+
+#
+# script inventory stuff
+#
+
+# shellcheck disable=SC2034
+{
+	declare -r script_version='1.0.0 b0'
+	declare -r script_description='[placeholder]'
+	declare -r script_usage=''
+	declare -r script_name="${BASH_SOURCE[0]}"
+
+	# must be empty in the release
+	# must be placed BEFORE the sourcing library
+	declare -r DEBUG=
+}
+
+# use library. must be placed at the very begining but after DEBUG.
+for library_path in '.' "$( dirname "$script_name" )" '/home/user/bin'; do [[ -f "$library_path/functions.sh" ]] && { source "$library_path/functions.sh"; break; }; done
+[[ -n "$script_author" ]] || { printf 'ERROR: Library functions.sh not found. Exiting...\n'; exit 1; }
+
+
+# global consts
+
+declare -r files="/var/log/miner/t-rex/$HOSTNAME-?-??.log"
+declare -r sleep_time='20s'
+declare -r -i max_steps_till_clear_screen=10
+
+
+# global vars
+
+declare file=''
+declare text_buffer=''
+declare -i counter_to_clear_screen=0
+
+
+# functions
+
+get_timestamp_from_log_string() {
+	echo "${1::17}"
+}
+
+convert_timestamp_to_seconds() {
+	echo "$( date -d "$1" +%s )"
+}
+
+print_time_difference() {
+	last_diff_string="$( tac "$file" | grep --max-count=1 'New difficulty:' )"
+	last_diff_timestamp="$( get_timestamp_from_log_string "$last_diff_string" )"
+	last_diff_timestamp_in_seconds="$( convert_timestamp_to_seconds "$last_diff_timestamp" )"
+	time_difference_in_seconds_since_last_diff_change="$(( $(time::get_current_date_in_seconds) - last_diff_timestamp_in_seconds ))"
+	echo "Time since last diff change: $( time::seconds2dhms "$time_difference_in_seconds_since_last_diff_change" )          "
+}
+
+grep_logs_to_text_buffer() {
+	text_buffer="$(
+		for file in $files; do
+			echo
+			echo -n "$file:"
+			if [[ -f "$file" ]]; then
+				echo
+				tac "$file" | grep --color=always --max-count=4 'New difficulty:' | tac
+				print_time_difference
+				tac "$file" | grep --color=always --max-count=1 'Uptime:'
+				tac "$file" | grep --color=always --max-count=1 'Shares/min:'
+				tac "$file" | grep --color=always --max-count=1 ' OK '
+			else
+				echo ' not found.'
+			fi
+		done
+	)"
+}
+
+
+# code
+
+clear
+
+while true; do
+	grep_logs_to_text_buffer
+	if (( ++counter_to_clear_screen > max_steps_till_clear_screen )); then
+		counter_to_clear_screen=0
+		clear
+	else
+		tput cup 0 0
+	fi
+	echo -e "$text_buffer"
+	echo
+	echo -n "$counter_to_clear_screen/$max_steps_till_clear_screen..."
+	sleep "$sleep_time"
+done

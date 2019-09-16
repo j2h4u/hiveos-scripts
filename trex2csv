@@ -1,0 +1,373 @@
+#!/usr/bin/env bash
+
+[ -t 1 ] && . colors
+
+#DEBUG=true
+
+declare -A SCRIPT
+SCRIPT[version]="0.2.1"
+SCRIPT[description]="Export t-rex logs to CSV"
+SCRIPT[author]="https://github.com/j2h4u"
+SCRIPT[basename]="$(basename $0)"
+SCRIPT[usage]="Usage: ${CYAN}${SCRIPT[basename]}${NOCOLOR}"
+
+csv_field_delimiter=";"
+csv_decimal_point_delimiter=","
+
+# functions
+
+function _err {
+	(
+	echo -e "${BRED}ERROR:${NOCOLOR} $*"
+	local frame=0
+	while (echo -n "       "; caller $frame); do
+		((frame++));
+	done
+	echo
+	) >&2
+}
+
+function _die {
+	_err "$*"
+	exit 1
+}
+
+function directory_exist {
+	[ -d "$1" ]
+}
+
+function file_exist {
+	[ -f "$1" ]
+}
+
+function variable_empty {
+	[ -z "$1" ]
+}
+
+function print_version {
+	echo -e "${CYAN}${SCRIPT[description]} by ${SCRIPT[author]}, version ${SCRIPT[version]}${NOCOLOR}"
+	echo
+}
+
+function _trim_string {
+	local string="$*"
+	# remove leading whitespace characters
+	string="${string#"${string%%[![:space:]]*}"}" #"
+	# remove trailing whitespace characters
+	string="${string%"${string##*[![:space:]]}"}" #"
+	echo -n "$string"
+}
+
+function __khs2mhs {
+	# multiply $hashrate by 1000
+	local floor=${hashrate%.*}
+	[[ $floor = "0" ]] && floor=''
+	local frac='0000'
+	[[ $floor != $hashrate ]] && frac=${hashrate#*.}$frac
+	hashrate="${floor}${frac:0:3}"
+
+	# then divide $hashrate by 1000000
+	local _d=${3:-2}
+	local _n=0000000000
+	_n=${_n:0:$_d}
+	local _r=$(($hashrate$_n/1000000))
+	hashrate=${_r:0:-$_d}.${_r: -$_d}
+}
+
+function _advance_line_counter {
+	line_counter+=1
+	# update counter every 1000th time
+	(( $line_counter % 1000 == 0)) && echo -n -e "\r$line_counter"
+}
+
+# compose CSV header
+
+function __compose_csv_header_prefix {
+	current_line+="date${csv_field_delimiter}host${csv_field_delimiter}algo"
+}
+
+function __compose_csv_header_body_for_all {
+	current_line+="${csv_field_delimiter}gpu$gpu_counter intensity${csv_field_delimiter}gpu$gpu_counter hashrate"
+}
+function __compose_csv_header_body_for_one {
+	current_line+="${csv_field_delimiter}index${csv_field_delimiter}name${csv_field_delimiter}intensity${csv_field_delimiter}hashrate"
+}
+
+# compose CSV record
+
+function __compose_csv_record_prefix {
+	current_line+="${datetime}${csv_field_delimiter}${HOSTNAME}${csv_field_delimiter}${algo}"
+}
+
+function __compose_csv_record_body_for_all {
+	current_line+="${csv_field_delimiter}i${gpu_intensity[$gpu_index]}${csv_field_delimiter}${hashrate}"
+}
+function __compose_csv_record_body_for_one {
+	current_line+="${csv_field_delimiter}$gpu_index${csv_field_delimiter}${gpu_name[$gpu_index]}${csv_field_delimiter}i${gpu_intensity[$gpu_index]}${csv_field_delimiter}${hashrate}"$'\n'
+}
+
+function _compose_csv_header_for {
+	echo -n "Writing CSV header: prefix"
+	__compose_csv_header_prefix
+
+	case "$1" in
+		"all")
+			# all gpus per one line
+			#
+			# get length of an array
+			number_of_gpus="${#gpu_intensity[@]}"
+			local -i gpu_counter
+			for (( gpu_counter=0; gpu_counter < $number_of_gpus; gpu_counter++ )); do
+				echo -n ", gpu$gpu_counter"
+				__compose_csv_header_body_for_${1}
+			done
+			;;
+		"one")
+			# one gpu per line
+			echo -n ", gpu stats"
+			__compose_csv_header_body_for_${1}
+			;;
+		*)
+			_die "unknown method"
+			;;
+	esac
+
+	current_line+=$'\n'
+	echo
+}
+
+function _compose_csv_record_for {
+	case "$1" in
+		"all")
+			# all gpus per one line
+			if (( $gpu_index == 0 )); then
+				__compose_csv_record_prefix
+			fi
+
+			__compose_csv_record_body_for_${1}
+
+			# add newline after last gpu stats. $gpu_index is zero-based.
+			if (( $gpu_index+1 == $number_of_gpus )); then
+				current_line+=$'\n'
+			fi
+			;;
+		"one")
+				__compose_csv_record_prefix
+				__compose_csv_record_body_for_${1}
+			;;
+		*)
+			_die "unknown method"
+			;;
+	esac
+}
+
+function _decompose_gpu_stats {
+	#
+	# decompose whole gpu stats string to separate variables
+	#
+	# in: $raw_line
+	# out: $datetime $gpu_index $hashrate $unit
+
+	local raw_datetime
+	local year
+	local month
+	local day
+	local hhmmss
+
+	local gpu_index_tmp
+	local hashrate_tmp
+
+	# before:
+	# 20190408 18:27:55 GPU #0: ASUS GTX 1070 Ti      -   24.16 MH/s, [T:63C, P:141W, F:69%, E:281kH/W]
+
+	raw_line="${raw_line%%,*}" # cut unrelevant: retain the part before the ','
+
+	# after:
+	# 20190408 18:27:55 GPU #0: ASUS GTX 1070 Ti      -   24.16 MH/s
+
+	# get date and time
+	raw_datetime="${raw_line::17}" # return the first 17 characters
+	year="${raw_datetime::4}"
+	month="${raw_datetime:4:2}"
+	day="${raw_datetime:6:2}"
+	hhmmss="${raw_datetime:9:8}"
+	datetime="${year}-${month}-${day} ${hhmmss}"
+
+	# get gpu index
+	gpu_index_tmp="${raw_line##*#}" # retain the part after the last '#'
+	gpu_index="${gpu_index_tmp%%:*}" # retain the part before the ':'
+
+	# get hashrate
+	hashrate_tmp="${raw_line##*-}" # retain the part after the last '-'
+	hashrate_tmp="${hashrate_tmp#"${hashrate_tmp%%[![:space:]]*}"}" #" remove leading spaces
+	hashrate="${hashrate_tmp%% *}" # retain the part before the ' '
+
+	# get hashrate unit
+	unit="${raw_line##* }" # retain the part after the last ' '
+
+	# upscale hashrate to mh/s if need
+	if [[ $unit == "kH/s" ]]; then
+		__khs2mhs
+	fi
+
+	# change decimal point to comma
+	hashrate=${hashrate/./$csv_decimal_point_delimiter}
+}
+
+function _extract_intensity {
+	#
+	# extract names and intensities of all GPUs
+	#
+	# in: $raw_line
+	# out: $gpu_name[] $gpu_intensity[]
+
+	local gpu_index
+	local gpu_index_tmp
+	local gpu_name_tmp
+
+	#
+	# string to decompose:
+	# 20190408 18:27:46 WARN: GPU #1: Gigabyte P106-100, intensity set to 20
+	#                             ^ ^
+	#                             1 2
+	# get gpu index
+	gpu_index_tmp="${raw_line##*#}" # 1: retain the part after the last '#'
+	gpu_index="${gpu_index_tmp%%:*}" # 2: retain the part before the ':'
+
+	# get gpu name
+	gpu_name_tmp="${raw_line##*: }" # retain the part after the last ': '
+	gpu_name_tmp="${gpu_name_tmp%%,*}" # retain the part before the ','
+
+	case "$gpu_name_tmp" in
+		*"1050 Ti"*)
+			gpu_name_tmp="1050ti"
+			;;
+		*"1060 3GB"*)
+			gpu_name_tmp="1063"
+			;;
+		*"1060 6GB"*)
+			gpu_name_tmp="1066"
+			;;
+		*"P106-100"*)
+			gpu_name_tmp="P106"
+			;;
+		*"1070 Ti"*)
+			gpu_name_tmp="1070ti"
+			;;
+		*)
+			gpu_name_tmp="unknown ($gpu_name_tmp)"
+			;;
+	esac
+	
+	gpu_name[$gpu_index]=$gpu_name_tmp
+
+	# get gpu intensity
+	gpu_intensity[$gpu_index]="${raw_line##* }" # retain the part after the last ' '
+
+	echo "gpu${gpu_index}: ${gpu_name[$gpu_index]}, intensity ${gpu_intensity[$gpu_index]}"
+}
+
+function _extract_algo {
+	#
+	# extract algo. one-timer.
+	#
+	# in: $raw_line
+	# out: $algo
+
+	local algo_tmp
+
+	#
+	# string to decompose:
+	# 20190408 18:27:50 Uptime: 3 secs | Algo: x16r | T-Rex v0.9.2
+	#                                          ^^^^
+	#                                          1  2
+	if variable_empty "$algo"; then
+		algo_tmp="${raw_line##*: }" # 1: retain the part after the last ': '
+		algo="${algo_tmp%% *}" # 2: retain the part before the ' '
+		echo "Algo: ${algo}"
+	fi
+}
+
+function _remove_colors {
+	# remove ESC-colors
+	dataset_in=$(
+		sed "s,$(printf '\033')\\[[0-9;]*[a-zA-Z],,g" < "$from_log")
+}
+
+function make_csv {
+	local from_log="$1"
+	local one_or_all="$2"
+	local to_csv="${from_log}.csv"
+
+	local -a gpu_intensity # gpu_intensity[gpu#]
+	local -a gpu_name # gpu_name[gpu#]
+
+	local -i line_counter
+	local -i number_of_gpus
+	
+	local dataset_in
+	local dataset_out
+	local algo=""
+
+	local raw_line
+	local current_line=""
+
+	local datetime
+	local gpu_index
+	local hashrate
+	local unit
+
+	echo "Processing ${from_log}..."
+
+	_remove_colors
+
+	while read raw_line; do
+
+		_advance_line_counter
+
+		case "$raw_line" in
+
+			*"GPU"*"H/s"*)
+				if variable_empty "$current_line"; then
+					_compose_csv_header_for $one_or_all
+				else
+					current_line=""
+				fi
+
+				_decompose_gpu_stats
+				_compose_csv_record_for $one_or_all
+
+				dataset_out+="$current_line"
+				;;
+
+			*", intensity set to "*)
+				_extract_intensity
+				;;
+
+			*"Algo: "*)
+				_extract_algo
+				;;
+
+		esac
+
+	done <<< "$dataset_in"
+
+	echo -n -e "\r$line_counter line(s) done.\n"
+	printf "%s" "$dataset_out" > "$to_csv"
+}
+
+# main()
+
+print_version
+
+case "$1" in
+	one|all)
+		one_or_all="$1"
+		;;
+	*)
+		one_or_all="one"
+		;;
+esac
+
+set -u
+make_csv "ch1(20190406.1955-20190407.2042)t-rex.log" "$one_or_all"

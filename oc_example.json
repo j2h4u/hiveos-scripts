@@ -1,0 +1,298 @@
+{
+  "data": [
+    {
+      "id": 182139,
+      "farm_id": 46333,
+      "name": "ch1 - night",
+      "is_favorite": false,
+      "options": {
+        "default": {
+          "nvidia": {
+            "logo_off": false,
+            "fan_speed": "70",
+            "mem_clock": "1474 1335 1464 862 1123 1274 1204 1507 1110 1760",
+            "core_clock": "180 178 160 179 180 150 129 144 173 168",
+            "power_limit": "147 103 73 63 110 115 102 77 75 75"
+          }
+        },
+        "by_algo": [
+          {
+            "algo": "x16r",
+            "nvidia": {
+              "logo_off": false,
+              "fan_speed": "70",
+              "mem_clock": "-1500",
+              "core_clock": "180 180 160 179 180 150 130 145 180 175",
+              "power_limit": "147 103 73 63 110 115 102 77 75 75"
+            }
+          },
+          {
+            "algo": "ethash",
+            "nvidia": {
+              "logo_off": false,
+              "fan_speed": "70",
+              "mem_clock": "1474 1335 1464 862 1123 1274 1208 1505 1114 1764",
+              "core_clock": "180 179 169 180 180 151 133 145 180 174",
+              "power_limit": "117 76 76 76 70 90 90 67 53 53"
+            }
+          },
+          {
+            "algo": "equihash 150/5",
+            "nvidia": {
+              "logo_off": false,
+              "fan_speed": "70",
+              "mem_clock": "1485 1335 1465 865 1130 1275 1205 1531 1111 1761",
+              "core_clock": "180 178 169 180 179 151 133 143 174 169",
+              "power_limit": "147 103 73 63 110 115 102 77 75 75"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": 182140,
+      "farm_id": 46333,
+      "name": "ch2 - night",
+      "is_favorite": false,
+      "options": {
+        "default": {
+          "nvidia": {
+            "logo_off": false,
+            "fan_speed": "70",
+            "mem_clock": "1190 1294 1410 1309 1420 1420 977 2000 1362",
+            "core_clock": "180 180 175 180 180 180 130 180 180",
+            "power_limit": "90 85 83 93 91 93 99 75 105"
+          }
+        },
+        "by_algo": [
+          {
+            "algo": "x16r",
+            "nvidia": {
+              "logo_off": false,
+              "fan_speed": "70",
+              "mem_clock": "-1500",
+              "core_clock": "180 180 175 180 180 180 130 180 180",
+              "power_limit": "96 85 83 93 83 93 90 75 113"
+            }
+          },
+          {
+            "algo": "ethash",
+            "nvidia": {
+              "logo_off": false,
+              "fan_speed": "70",
+              "mem_clock": "1190 1294 1410 1309 1420 1420 977 2000 1354",
+              "core_clock": "180 180 175 179 180 180 130 180 168",
+              "power_limit": "76 76 76 76 76 76 76 53 76"
+            }
+          },
+          {
+            "algo": "equihash 150/5",
+            "nvidia": {
+              "logo_off": false,
+              "fan_speed": "70",
+              "mem_clock": "1189 1293 1410 1309 1420 1420 977 2000 1362",
+              "core_clock": "178 180 177 180 180 180 149 177 180",
+              "power_limit": "90 85 83 93 91 93 99 75 120"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": 182141,
+      "farm_id": 46333,
+      "name": "ch3 - night",
+      "is_favorite": false,
+      "options": {
+        "default": {
+          "nvidia": {
+            "logo_off": false,
+            "fan_speed": "70",
+            "mem_clock": "1090 1480 1274 884 1510 630 589 848 668 1030 1219",
+            "core_clock": "175 180 180 180 140 140 175 180 176 180 180",
+            "power_limit": "87 113 110 82 120 105 85 97 91 101 86"
+          }
+        },
+        "by_algo": [
+          {
+            "algo": "x16r",
+            "nvidia": {
+              "logo_off": false,
+              "fan_speed": "70",
+              "mem_clock": "-1500",
+              "core_clock": "175 180 180 180 140 140 175 180 176 180 180",
+              "power_limit": "87 110 102 79 120 102 79 91 85 93 82"
+            }
+          },
+          {
+            "algo": "ethash",
+            "nvidia": {
+              "logo_off": false,
+              "fan_speed": "70",
+              "mem_clock": "1090 1480 1273 877 1510 630 589 846 670 1030 1219",
+              "core_clock": "175 180 175 175 140 140 175 180 180 179 180",
+              "power_limit": "85"
+            }
+          },
+          {
+            "algo": "equihash 150/5",
+            "nvidia": {
+              "logo_off": false,
+              "fan_speed": "70",
+              "mem_clock": "1090 1480 1274 884 1510 630 589 846 668 1030 1219",
+              "core_clock": "175 180 180 180 140 140 175 179 175 180 180",
+              "power_limit": "87 113 110 82 120 105 85 97 91 101 86"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": 182171,
+      "farm_id": 46333,
+      "name": "ch1 - day",
+      "is_favorite": true,
+      "options": {
+        "default": {
+          "nvidia": {
+            "logo_off": false,
+            "fan_speed": "70",
+            "mem_clock": "1485 1335 1465 865 1130 1273 1210 1534 1115 1761",
+            "core_clock": "180 180 160 180 180 150 130 143 180 169",
+            "power_limit": "117 76 76 76 70 90 90 76 53 53"
+          }
+        },
+        "by_algo": [
+          {
+            "algo": "x16r",
+            "nvidia": {
+              "logo_off": false,
+              "fan_speed": "70",
+              "mem_clock": "-1500",
+              "core_clock": "180 180 160 180 180 148 130 143 180 175",
+              "power_limit": "117 76 76 76 70 90 90 76 53 53"
+            }
+          },
+          {
+            "algo": "ethash",
+            "nvidia": {
+              "logo_off": false,
+              "fan_speed": "70",
+              "mem_clock": "1474 1335 1464 862 1121 1273 1208 1502 1114 1764",
+              "core_clock": "180 179 169 180 180 151 132 143 180 174",
+              "power_limit": "117 76 76 76 70 90 90 67 53 53"
+            }
+          },
+          {
+            "algo": "equihash 150/5",
+            "nvidia": {
+              "logo_off": false,
+              "fan_speed": "70",
+              "mem_clock": "1485 1335 1465 865 1130 1274 1205 1531 1111 1760",
+              "core_clock": "180 179 169 180 180 151 133 143 174 169",
+              "power_limit": "117 68 68 68 70 90 90 68 53 53"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": 182172,
+      "farm_id": 46333,
+      "name": "ch2 - day",
+      "is_favorite": true,
+      "options": {
+        "default": {
+          "nvidia": {
+            "logo_off": false,
+            "fan_speed": "70",
+            "mem_clock": "1190 1294 1410 1309 1420 1420 977 2000 1362",
+            "core_clock": "180 180 175 180 180 180 130 180 180",
+            "power_limit": "76 76 76 76 76 76 76 53 76"
+          }
+        },
+        "by_algo": [
+          {
+            "algo": "x16r",
+            "nvidia": {
+              "logo_off": false,
+              "fan_speed": "70",
+              "mem_clock": "-1500",
+              "core_clock": "180 180 175 180 180 178 130 180 180",
+              "power_limit": "76 76 76 76 76 76 76 53 76"
+            }
+          },
+          {
+            "algo": "ethash",
+            "nvidia": {
+              "logo_off": false,
+              "fan_speed": "70",
+              "mem_clock": "1190 1294 1410 1309 1419 1420 977 2000 1354",
+              "core_clock": "180 180 175 179 180 180 130 180 168",
+              "power_limit": "76 76 76 76 76 76 76 53 76"
+            }
+          },
+          {
+            "algo": "equihash 150/5",
+            "nvidia": {
+              "logo_off": false,
+              "fan_speed": "70",
+              "mem_clock": "1187 1293 1410 1309 1420 1420 977 2000 1362",
+              "core_clock": "176 178 177 180 180 180 149 177 180",
+              "power_limit": "68 68 68 68 68 68 68 53 68"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": 182173,
+      "farm_id": 46333,
+      "name": "ch3 - day",
+      "is_favorite": true,
+      "options": {
+        "default": {
+          "nvidia": {
+            "logo_off": false,
+            "fan_speed": "70",
+            "mem_clock": "1090 1480 1274 884 1510 630 589 848 668 1030 1219",
+            "core_clock": "175 180 180 180 140 140 175 180 180 180 180",
+            "power_limit": "67"
+          }
+        },
+        "by_algo": [
+          {
+            "algo": "x16r",
+            "nvidia": {
+              "logo_off": false,
+              "fan_speed": "70",
+              "mem_clock": "-1500",
+              "core_clock": "175 180 180 180 140 140 174 180 180 180 180",
+              "power_limit": "67"
+            }
+          },
+          {
+            "algo": "ethash",
+            "nvidia": {
+              "logo_off": false,
+              "fan_speed": "70",
+              "mem_clock": "1090 1480 1273 877 1510 630 589 846 670 1030 1219",
+              "core_clock": "175 180 175 175 140 140 175 180 180 179 180",
+              "power_limit": "67"
+            }
+          },
+          {
+            "algo": "equihash 150/5",
+            "nvidia": {
+              "logo_off": false,
+              "fan_speed": "70",
+              "mem_clock": "1090 1480 1274 884 1510 630 589 846 668 1030 1219",
+              "core_clock": "175 180 180 180 140 140 175 178 176 180 180",
+              "power_limit": "67"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

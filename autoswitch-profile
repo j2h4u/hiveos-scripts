@@ -1,0 +1,201 @@
+#!/usr/bin/env bash
+
+. "$(dirname "$0")/functions.sh" # use library
+
+
+#
+# script inventory stuff
+#
+
+script_version='2.1.1'
+script_description='Manage time of day profiles for HiveOS Autoswitch'
+script_usage='f[lip] | d[ay] | n[ight] | w[hats-next] | s[tatus]'
+
+
+#
+# functions
+#
+
+check_files() {
+	local config_file=''
+
+	for config_file in "${!conf[@]}"; do
+		if_debug: echo -n "DEBUG: checking \${conf[$config_file]}: '${conf[$config_file]}'... "
+		if is_file_not_exist "${conf[$config_file]}";  then
+			_die "$config_file conf \"${conf[$config_file]}\" not exist"
+		else
+			if_debug: echo 'Exist.'
+		fi
+	done
+}
+
+get_current_time_of_day() {
+	source "${conf[main]}" > /dev/null 2>&1
+
+	case "$time_of_day" in
+		"")
+			_die "\$time_of_day variable not defined in '${conf[main]}'"
+			;;
+		day|night)
+			echo "$time_of_day"
+			;;
+		*)
+			_die "\$time_of_day variable is not a 'day' or 'night'. It's just '$time_of_day'"
+			;;
+	esac
+}
+
+print_benchmarks() {
+	local time_of_day=''
+	local line=''
+	local algos=''
+	local algo_name=''
+	local algo_bench=''
+	local highlight_day=''
+	local highlight_night=''
+
+	for time_of_day in day night; do
+		source "${conf[$time_of_day]}" > /dev/null 2>&1
+		for line in $( json::print_brutally_cleansed_json_string "$BENCHMARK" ); do
+			while IFS== read algo_name algo_bench; do
+				conf["${time_of_day}"."${algo_name}"]="$algo_bench"
+				algos+="$algo_name"$'\n'
+			done <<< $line
+		done
+	done
+
+	if [[ $(get_current_time_of_day) == 'day' ]]; then
+		highlight_day="${BGREEN}"
+		highlight_night="${LGRAY}"
+	else
+		highlight_day="${LGRAY}"
+		highlight_night="${BGREEN}"
+	fi
+
+	# print header
+	printf '%-15.15s %b%7.7s%b    %b%7.7s%b\n' '' "$highlight_day" 'day' "${NOCOLOR}" "$highlight_night" 'night' "${NOCOLOR}"
+
+	# remove duplicate algos and sort
+	algos=$(sort --unique <<< "$algos")
+
+	for algo_name in $algos; do
+
+		# skip algos without benchmarks
+		if [[ ${conf[day.$algo_name]} == 0 && ${conf[night.$algo_name]} == 0 ]]; then
+			continue
+		fi
+
+		# algo name
+		printf '%-15.15s' "$algo_name"
+		printf ' '
+
+		# day value
+		printf '%b%7.2f%b' "$highlight_day" "${conf[day.$algo_name]}" "${NOCOLOR}"
+
+		# mark algos with the same benchmarks
+		if [[ "${conf[day.$algo_name]}" == "${conf[night.$algo_name]}" ]]; then
+			printf '  %b%s%b ' "${RED}" '=' "${NOCOLOR}"
+		else
+			printf '    '
+		fi
+
+		# night value
+		printf '%b%7.2f%b' "$highlight_night" "${conf[night.$algo_name]}" "${NOCOLOR}"
+		printf '\n'
+	done
+}
+
+choose_where_to_switch() {
+	case "$1" in
+		flip|f)
+			# flip day/night
+			if [[ $(get_current_time_of_day) == 'day' ]]; then
+				echo 'night'
+			else
+				echo 'day'
+			fi
+			;;
+		night|n)
+			echo 'night'
+			;;
+		day|d)
+			echo 'day'
+			;;
+		*)
+			_die "\$1 argument not right"
+			;;
+	esac
+}
+
+switch_configs_to() {
+	local -r switch_to_time_of_day="${1-}"
+	local current_time_of_day=''
+
+	if is_variable_empty "$switch_to_time_of_day"; then
+		_die 'no argument given.'
+	fi
+
+	current_time_of_day="$(get_current_time_of_day)"
+
+	echo -n -e "Switching from $current_time_of_day to ${BGREEN}$switch_to_time_of_day${NOCOLOR}... "
+
+	if [[ $current_time_of_day == "$switch_to_time_of_day" ]]; then
+		echo 'Oi mate! Nothing to switch, just keep current state.'
+	else
+		if sed --in-place=~ "s/time_of_day=\"$current_time_of_day\"/time_of_day=\"$switch_to_time_of_day\"/" "${conf[main]}"; then
+			echo 'Done.'
+		else
+			_die 'sed failed.'
+		fi
+	fi
+}
+
+
+#
+# variables
+#
+
+DEBUG=
+
+declare -r day_suffix='day'
+declare -r night_suffix='night'
+
+declare -A conf=(
+	[main]='/hive-config/autoswitch.conf'
+	[day]="${conf[main]}.$day_suffix"
+	[night]="${conf[main]}.$night_suffix"
+)
+
+declare -A conf_pow=(
+	[main]='/hive-config/autoswitch_pow.conf'
+	[day]="${conf_pow[main]}.$day_suffix"
+	[night]="${conf_pow[main]}.$night_suffix"
+)
+
+
+#
+# main()
+#
+
+check_files
+
+case "${1-}" in
+	whats-next|w)
+		choose_where_to_switch flip
+		;;
+
+	flip|f|day|d|night|n)
+		print_script_version
+		switch_configs_to "$(choose_where_to_switch "${1-}")"
+		;;
+
+	status|s)
+		print_script_version
+		print_benchmarks
+		;;
+
+	*)
+		print_script_version
+		print_script_usage
+		;;
+esac

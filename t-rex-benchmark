@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+
+declare -r session_name="x16r-benchmark"
+declare -A instances
+
+case "$HOSTNAME" in
+	'ch3')
+		#
+		# 1063: 17 < 18 < 19 > 20
+		# diff 16
+		# 17:	7.88																	(6h 32.69mh)
+		# 18:	8.06																	(6h 30.66mh)
+		# 19:	8.97*		8.65		8.22 (6h 35.39mh*)		8.04 (6h 32.56mh)
+		# 20:	8.13		7.59														(6h 29.50mh)
+		# 21:				8.67*		8.06 (6h 33.39mh)		8.40 (6h 32.69mh*)
+		# 22:				8.52														(6h 33.81mh*)
+		# 23:							8.61* (6h 33.50mh)		7.89 (6h 31.91mh)
+		# 24:							8.23 (6h 31.70mh)
+		# 25:													7.94 (6h 30.62mh)
+		#
+		rich_gpu=( $( shuf -e {0..11} ) )
+
+		instances[0.devices]="${rich_gpu[0]},${rich_gpu[1]},${rich_gpu[2]}"
+		instances[0.intensity]='21'
+
+		instances[1.devices]="${rich_gpu[3]},${rich_gpu[4]},${rich_gpu[5]}"
+		instances[1.intensity]='21'
+
+		instances[2.devices]="${rich_gpu[6]},${rich_gpu[7]},${rich_gpu[8]}"
+		instances[2.intensity]='21'
+
+		instances[3.devices]="${rich_gpu[9]},${rich_gpu[10]},${rich_gpu[11]}"
+		instances[3.intensity]='21'
+		;;
+
+	'ch4')
+		# 1050ti: 19 > 23 > 24 > 25
+		#
+		# 19:	7.71 (6h 30.22mh)
+		# 20:												(6h 25.64mh)
+		# 21:												(6h 26.57mh*)
+		# 22:	7.52 (6h 28.45mh)
+		# 23:	7.22 (6h 33.57mh*)		 (6h 28.05mh*)		(6h 26.45mh)
+		# 24:							 (6h 26.64mh)
+		# 25:							 (6h 23.54mh)
+		#
+		rich_gpu=( $( shuf -e {0..12..2} ) )
+		poor_gpu=( $( shuf -e {1..11..2} ) )
+
+		instances[0.devices]="${rich_gpu[0]},${poor_gpu[0]},${rich_gpu[1]},${poor_gpu[1]}"
+		instances[0.intensity]='21'
+
+		instances[1.devices]="${rich_gpu[2]},${poor_gpu[2]},${rich_gpu[3]},${poor_gpu[3]}"
+		instances[1.intensity]='21'
+
+		instances[2.devices]="${rich_gpu[4]},${poor_gpu[4]},${rich_gpu[5]},${poor_gpu[5]}"
+		instances[2.intensity]='21'
+
+		instances[3.devices]="${rich_gpu[6]}"
+		instances[3.intensity]='21'
+		;;
+esac
+
+instances[count]=$(( ${#instances[@]} / 2 ))
+
+
+# code
+
+session_count="$( screen -ls | grep "$session_name" | wc -l )"
+if (( session_count > 0 )); then
+	screen -r "$session_name"
+	exit
+fi
+
+screen -dmS "$session_name" bash
+
+for (( instance=0; instance < ${instances[count]}; instance++ )); do
+	devices="${instances[${instance}.devices]}"
+	intensity="${instances[${instance}.intensity]}"
+	instance_name="$HOSTNAME-$instance-$intensity"
+
+	url_old="stratum+tcp://x16r.eu.nicehash.com:3366"
+	url_new="stratum+tcp://x16r.eu-new.nicehash.com:3366"
+	user_old="3B251YK9MXgiUnEk4MZy6Wn8RZgiwi76jy.${instance_name}"
+	user_new="32K5Fu9b6uK3Gjk6vtqjo1y1c1iLDi54ub.${instance_name}"
+
+	url="$url_new"
+	user="$user_new"
+
+	miner="/hive/miners/t-rex/0.12.1-cuda92/t-rex"
+	log="/var/log/miner/t-rex/${instance_name}.log"
+
+	rm "$log"
+
+	screen -S "$session_name" -X screen "$(( instance + 1 ))" \
+		"$miner" \
+		--algo x16r \
+		--intensity "$intensity" \
+		--devices "$devices" \
+		--exit-on-cuda-error \
+		--url "$url" \
+		--user "$user" \
+		--pass x \
+		--api-bind-http 0 \
+		--api-bind-telnet 0 \
+		--hashrate-avr $(( 60*60 )) \
+		--sharerate-avr $(( 60*60 )) \
+		--log-path "$log"
+	sleep 0.2
+	screen -S "$session_name" -X title " gpu${devices}=i${intensity} "
+	sleep 0.3
+done
+
+screen -r "$session_name"

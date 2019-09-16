@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+
+. colors
+. "$RIG_CONF"
+
+trap "echo; echo -e \"${NOCOLOR}Terminated.\"; exit" SIGINT
+
+
+# consts
+
+declare -r log='/run/hive/miner.1'
+declare -r -i initial_lines=20
+
+# vars
+
+declare pattern=''
+
+
+# code
+
+case "$MINER" in
+	'cryptodredge')
+		pattern=' : diff=\|Hash order\|[Ee]rror'
+		;;
+	'gminer')
+		pattern='s Avg Speed\|Uptime\|[Ee]rror\|Diff'
+		;;
+	'miniz')
+		pattern='^[^ ]'
+		;;
+	'ethminer')
+		pattern='Speed \|epoch\|incorrect'
+		;;
+	't-rex')
+		pattern=' OK \|Uptime\|[Ee]rror'
+		;;
+	*)
+		echo 'No pattern found for that miner!'
+		;;
+esac
+
+echo
+echo -e "miner: '${WHITE}${MINER}${NOCOLOR}'"
+echo -e "pattern: '${WHITE}${pattern}${NOCOLOR}'"
+echo
+
+if [ ! -z "$pattern" ]; then
+	grep "$pattern" "$log" | tail --lines="$initial_lines"
+	tail --lines=0 --follow=descriptor "$log" | grep "$pattern"
+else
+	tail --follow=descriptor "$log"
+fi

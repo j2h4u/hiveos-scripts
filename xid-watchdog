@@ -1,0 +1,428 @@
+#!/usr/bin/env bash
+
+
+#
+# script inventory stuff
+#
+
+# shellcheck disable=SC2034
+readonly script_version='2.9.8.b1'
+# shellcheck disable=SC2034
+readonly script_description='Report and log NVIDIA XID errors in realtime'
+script_usage='[start | stop | restart]'
+script_usage+='\n\n'
+script_usage+='Executing without arguments will try to resume to existing screen session (or, if it does not exist, start a new one)'
+readonly script_usage
+
+# must be empty in the release
+# must be placed BEFORE the sourcing library
+# shellcheck disable=SC2034
+readonly DEBUG=
+
+# use library. must be placed at the very begining, but after DEBUG!
+source "$(dirname "$0")/functions.sh"
+
+
+#
+# functions
+#
+
+log_prefix() {
+	#
+	# Usage: log_prefix
+	#
+	# stdin: none
+	# stdout: "timestamp host process:"
+	# exit code: none
+	#
+	arguments: $# none
+
+	# code
+
+	# shellcheck disable=SC2154
+	printf '%(%b %_d %T)T %s %s:' '-1' "$HOSTNAME" "$script_basename"
+}
+
+print_past_entries() {
+	#
+	# Usage: print_past_entries
+	#
+	arguments: $# none
+
+	# vars
+
+	local today_date=''
+	local all_matches=''
+	local today_matches=''
+	local not_today_matches=''
+
+	# code
+
+	readonly today_date="$(date '+%b %_d')"
+	readonly all_matches="$(grep "$NVRM_COMMON_EVENT_PATTERN" "$FROM_LOG")"
+	readonly today_matches="$(grep "^$today_date" <<< "$all_matches")"
+	readonly not_today_matches="$(grep --invert-match "^$today_date" <<< "$all_matches")"
+
+	echo -e "${WHITE}Past entries for pattern '$NVRM_COMMON_EVENT_PATTERN':${NOCOLOR}"
+
+	{
+		if is_variable_not_empty "$not_today_matches"; then echo -e "${DGRAY}$not_today_matches${NOCOLOR}"; fi
+		if is_variable_not_empty "$today_matches"; then echo -e "$today_matches"; fi
+	} | tail --lines="$LOG_LINES"
+
+	echo
+}
+
+populate_pci_bus_to_gpu_index_dictionary() {
+	#
+	# Usage: populate_pci_bus_to_gpu_index_dictionary
+	#
+	# Populate dictionary: pci_bus_to_gpu_index_dictionary[<pci bus address>]=<gpu index>
+	#
+	arguments: $# none
+
+	# vars
+
+	local nvidia_smi_output=''
+
+	local _gpu_index=''
+	local _pci_domain=''
+	local _pci_bus=''
+	local _pci_device=''
+
+	local pci_bus_id=''
+
+	# code
+
+	readonly nvidia_smi_output="$(nvidia-smi --format=csv,nounits,noheader --query-gpu=index,pci.domain,pci.bus,pci.device)"
+	# maybe exit code check?
+
+	while IFS=' ,' read -r _gpu_index _pci_domain _pci_bus _pci_device; do
+		{
+			: "${_pci_domain//0x}:${_pci_bus//0x}:${_pci_device//0x}" # construct like "0000:01:00"
+			: "${_,,}" # tolower all hex chars, because of nvidia's syslog output format. "0000:0A:00" -> "0000:0a:00"
+			: "PCI:$_" # final construction, f.e. "PCI:0000:01:00"
+			pci_bus_id="$_"
+		}
+		pci_bus_to_gpu_index_dictionary["$pci_bus_id"]="${_gpu_index}" # populate dictionary like pci_bus_to_gpu_index_dictionary["PCI:0000:01:00"]="0"
+		if_debug: echo "DEBUG: gpu# '${pci_bus_to_gpu_index_dictionary[$pci_bus_id]}' at '${pci_bus_id}'"
+	done <<< "$nvidia_smi_output"
+}
+
+get_gpu_index_from() {
+	#
+	# Usage: get_gpu_index_from 'line_of_text'
+	#
+	# Extract gpu index <- gpu bus <- $1
+	# In case of error returns error's description instead of index
+	#
+	# 'line' expected as like 'May  7 20:22:11 ch1 kernel: [ 6443.073592] NVRM: GPU at PCI:0000:0b:00: GPU-d18a4666-6f51-3a44-9346-dbba4eab5c1c'
+	#
+	arguments: $# exactly 1
+
+	# args
+
+	local -r line_of_text="$1"
+
+	# consts
+
+	local -r PCI_BUS_RE='PCI:[[:xdigit:]]{4}:[[:xdigit:]]{2}:[[:xdigit:]]{2}'
+
+	# vars
+
+	local pci_bus_id=''
+	local gpu_index='?' # like 'RmInitAdapter failed'
+
+	# code
+
+	# matching...
+	[[ $line_of_text =~ $PCI_BUS_RE ]]
+
+	# check for any inconsistencies: no match, no such gpu
+	if is_variable_not_empty "${BASH_REMATCH[0]-}"; then
+		# extract pci_bus from string
+		readonly pci_bus_id="${BASH_REMATCH[0]}"
+
+		if is_variable_not_empty "${pci_bus_to_gpu_index_dictionary[$pci_bus_id]-}"; then
+			# get gpu index from dictionary
+			readonly gpu_index="${pci_bus_to_gpu_index_dictionary[$pci_bus_id]}"
+		else
+			# no such gpu
+			readonly gpu_index="no such gpu: $pci_bus_id"
+		fi
+
+	else
+		# no match
+		:
+	fi
+	
+	echo "$gpu_index"
+}
+
+print_system_state() {
+	#
+	# Usage: print_system_state
+	#
+	arguments: $# none
+
+	#. "$RIG_CONF" && echo "$MINER"
+	#. "$NVIDIA_OC_CONF"
+	#echo "$CLOCK"
+	#echo "$MEM"
+	#echo "$PLIMIT"
+
+	# code
+
+	grep '^META=\|### FLIGHT SHEET' "$WALLET_CONF"
+	echo
+	head --lines=4 "$NVIDIA_OC_CONF"
+}
+
+format_message() {
+	#
+	# Usage: format_message 'message_header' 'message_body' > 'formatted_message'
+	#
+	# Stick header to body
+	#
+	arguments: $# exactly 2
+
+	# consts
+
+	local -r message_header="===[ $1 ]=========================================" # cool method to draw lines: printf "%${cols}s"  | tr " " "="
+	local -r message_body="$2"
+	#local -r message_footer="${message_header//?/=}" # replace all chars to "="
+
+	# vars
+
+	local formatted_message=''
+
+	# code
+
+	formatted_message="$message_header"$'\n'
+	formatted_message+="$message_body"$'\n'
+	readonly formatted_message
+	#formatted_message+="$message_footer"$'\n'
+
+	printf '%s' "$formatted_message"
+}
+
+write_message_to_log() {
+	#
+	# Usage: write_message_to_log 'formatted_message'
+	#
+	arguments: $# exactly 1
+
+	# consts
+
+	local -r formatted_message="$1"
+
+	# code
+
+	{
+		printf '%s' "$formatted_message"
+		printf '\n\n'
+	} >> "$TO_LOG"
+
+	sync "$TO_LOG"
+}
+
+send_message_to_frontend() {
+	#
+	# Usage: send_message_to_frontend 'frontend header' 'formatted_message'
+	#
+	arguments: $# exactly 2
+
+	# args
+
+	local -r frontend_header="$1"
+	local -r formatted_message="$2"
+
+	# code
+
+	# highlight pattern and send
+	printf '%s' "$formatted_message" | grep --color=always "$NVRM_COMMON_EVENT_PATTERN"'\|$' | message err "$frontend_header" payload > /dev/null
+}
+
+do_simple_error_report() {
+	#
+	# Usage: do_simple_error_report 'line'
+	#
+	arguments: $# exactly 1
+
+	# args
+
+	local -r line="$1"
+
+	# vars
+
+	local gpu_index=''
+	local frontend_header=''
+	local message_header=''
+	local message_body=''
+	local formatted_message=''
+
+	# code
+
+	# get gpu index
+	readonly gpu_index="$( get_gpu_index_from "$line" )"
+
+	# compose headers
+	if [[ gpu_index != '?' ]]; then
+		readonly frontend_header="GPU$gpu_index error"
+	else
+		readonly frontend_header="Adapter failed"
+	fi
+	readonly message_header="$frontend_header"
+
+	# compose message body: error + system state
+	message_body="${line}"
+	message_body+=$'\n'$'\n'
+	message_body+="$(print_system_state)"
+	readonly message_body
+
+	readonly formatted_message=$(format_message "$message_header" "$message_body")
+
+	write_message_to_log "$formatted_message" & # send to background for better responsiveness
+	send_message_to_frontend "$frontend_header" "$formatted_message" & # send to background for better responsiveness
+}
+
+do_extended_error_report() {
+	#
+	# Usage: do_extended_error_report
+	#
+	arguments: $# none
+
+	# consts
+
+	local -r frontend_header='Extended error report'
+	local -r message_header="Last lines from $FROM_LOG"
+
+	# vars
+
+	local message_body=''
+	local formatted_message=''
+
+	# code
+
+	readonly message_body="$(tail --lines="$LOG_LINES" "$FROM_LOG" | grep --invert-match "CRON\|dbus\|systemd\|promiscuous mode")"
+	readonly formatted_message=$(format_message "$message_header" "$message_body")
+
+	write_message_to_log "$formatted_message" & # send to background for better responsiveness
+	send_message_to_frontend "$frontend_header" "$formatted_message" & # send to background for better responsiveness
+}
+
+wait_for_errors() {
+	#
+	# Usage: wait_for_errors
+	#
+	arguments: $# none
+
+	# consts
+
+	local -r waiting_message="Waiting for pattern '$NVRM_COMMON_EVENT_PATTERN'"
+
+	# vars
+
+	local line=''
+	local nvrm_common_event_happened_flag=''
+	local nvrm_init_adapter_failed_happened_flag=''
+
+	# code
+
+	echo -e -n "${WHITE}${waiting_message}...${NOCOLOR}"
+	SECONDS='0' # reset seconds since the last accident
+
+	# feeding from 'tail -f', waiting the patterns to come
+	while read line; do
+		case "$line" in
+			*"$NVRM_INIT_ADAPTER_FAILED_PATTERN"*)
+				if is_variable_empty "$nvrm_init_adapter_failed_happened_flag"; then
+					readonly nvrm_init_adapter_failed_happened_flag='sad but true' # it's a first time error, set flag
+					echo
+					echo -n "$(log_prefix) Init adapter failed. Sending immediate report..." # ...on the first occurence of an error
+					do_simple_error_report "$line" & # send to background for better responsiveness
+					echo ' Sent.'
+				else
+					# ignore
+					:
+				fi
+				;;
+			*"$NVRM_COMMON_EVENT_PATTERN"*)
+				if is_variable_empty "$nvrm_common_event_happened_flag"; then
+					readonly nvrm_common_event_happened_flag='sad but true' # it's a first time error, set flag
+					echo
+					echo -n "$(log_prefix) Pattern matched! Sending immediate report..." # ...on the first occurence of an error
+					do_simple_error_report "$line" & # send to background for better responsiveness
+					echo ' Sent.'
+				else
+					# send no report on any chained sequental errors but wait until the final error in the pack arrives
+					echo "$(log_prefix) Pattern matched again."
+				fi
+				;;
+			*)
+				if is_variable_empty "$nvrm_common_event_happened_flag"; then
+					echo -e -n "\r${WHITE}${waiting_message} for $( time::seconds2dhms "$SECONDS" )...   ${NOCOLOR}"
+				else
+					echo -n "$(log_prefix) Unrelevant log line arrived. Sending extended report on all previous errors..."
+					do_extended_error_report & # send to background for better responsiveness
+					echo ' Sent.'
+					break
+				fi
+				;;
+		esac
+	done < <(tail --follow=name --lines=0 "$FROM_LOG")
+
+	echo
+	echo
+}
+
+screen:run() {
+	arguments: $# none
+
+	# consts
+
+	local -i -r LOG_LINES='35'
+	local -r FROM_LOG='/var/log/syslog'
+	# shellcheck disable=SC2154
+	local -r TO_LOG="$script_log"
+
+	# log line looks like: ' Apr 16 14:30:22 ch1 kernel: [   19.034938] NVRM: loading NVIDIA UNIX x86_64 Kernel Module  418.43  Tue Feb 19 01:12:11 CST 2019'
+	local -r NVRM_COMMON_EVENT_PATTERN='NVRM: Xid' ###'NVRM'
+	# sometimes driver doesn't do well: 'Jun  3 02:34:32 ch3 kernel: [  931.960716] NVRM: RmInitAdapter failed! (0x31:0xffff:835)'
+	local -r NVRM_INIT_ADAPTER_FAILED_PATTERN='dapter failed'
+	#is_debug && NVRM_COMMON_EVENT_PATTERN='(/hive'
+
+	# vars
+
+	local -A pci_bus_to_gpu_index_dictionary=()
+
+	# code
+
+	populate_pci_bus_to_gpu_index_dictionary
+
+	while true; do
+		print_past_entries
+		wait_for_errors
+	done
+}
+
+
+#
+# main()
+#
+
+print_script_version
+
+case "${1-}" in
+	start|stop|restart|run)
+		screen:"$1"
+		;;
+	'')
+		screen:show
+		;;
+	*)
+		print_script_usage
+		;;
+esac
+
+exit
