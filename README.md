@@ -2,7 +2,7 @@
 
 ## Libraries, APIs
 - **boilerplate.sh**      My bash boilerplate
-- **functions.sh**        My little bash functions library
+- **functions.sh**        My little bash functions library. Syntax sugar, mostly.
 - **hive_api**            HiveOS API library
 - **json-to-array.sh**    An unfinished lesson on converting JSON to bash arrays
 
