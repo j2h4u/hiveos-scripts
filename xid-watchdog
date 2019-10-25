@@ -6,7 +6,7 @@
 #
 
 # shellcheck disable=SC2034
-readonly script_version='2.9.8.b1'
+readonly script_version='3.0.5'
 # shellcheck disable=SC2034
 readonly script_description='Report and log NVIDIA XID errors in realtime'
 script_usage='[start | stop | restart]'
@@ -59,11 +59,11 @@ print_past_entries() {
 	# code
 
 	readonly today_date="$(date '+%b %_d')"
-	readonly all_matches="$(grep "$NVRM_COMMON_EVENT_PATTERN" "$FROM_LOG")"
+	readonly all_matches="$(grep "$NVRM_XID_EVENT_PATTERN" "$FROM_LOG")"
 	readonly today_matches="$(grep "^$today_date" <<< "$all_matches")"
 	readonly not_today_matches="$(grep --invert-match "^$today_date" <<< "$all_matches")"
 
-	echo -e "${WHITE}Past entries for pattern '$NVRM_COMMON_EVENT_PATTERN':${NOCOLOR}"
+	echo -e "${WHITE}Past entries for pattern '$NVRM_XID_EVENT_PATTERN':${NOCOLOR}"
 
 	{
 		if is_variable_not_empty "$not_today_matches"; then echo -e "${DGRAY}$not_today_matches${NOCOLOR}"; fi
@@ -109,14 +109,14 @@ populate_pci_bus_to_gpu_index_dictionary() {
 	done <<< "$nvidia_smi_output"
 }
 
-get_gpu_index_from() {
+get_gpu_index_from_string() {
 	#
-	# Usage: get_gpu_index_from 'line_of_text'
+	# Usage: get_gpu_index_from_string 'line_of_text'
 	#
 	# Extract gpu index <- gpu bus <- $1
 	# In case of error returns error's description instead of index
 	#
-	# 'line' expected as like 'May  7 20:22:11 ch1 kernel: [ 6443.073592] NVRM: GPU at PCI:0000:0b:00: GPU-d18a4666-6f51-3a44-9346-dbba4eab5c1c'
+	# 'line_of_text' expected as like 'May  7 20:22:11 ch1 kernel: [ 6443.073592] NVRM: GPU at PCI:0000:0b:00: GPU-d18a4666-6f51-3a44-9346-dbba4eab5c1c'
 	#
 	arguments: $# exactly 1
 
@@ -157,6 +157,40 @@ get_gpu_index_from() {
 	fi
 	
 	echo "$gpu_index"
+}
+
+get_xid_code_from_string() {
+	#
+	# Usage: get_xid_code_from_string 'line_of_text'
+	#
+	# 'line_of_text' expected as like 'May 21 08:08:29 ch3 kernel: [953925.696776] NVRM: Xid (PCI:0000:0b:00): 61, 0a7c(2a9c) 00000000 00000000'
+	#                                                                                                          ^^
+	#
+	arguments: $# exactly 1
+
+	# args
+
+	local -r line_of_text="$1"
+
+	# consts
+
+	local -r NVRM_XID_RE='NVRM: Xid \(PCI:[[:xdigit:]]{4}:([[:xdigit:]]{2}):[[:xdigit:]]{2}\): ([[:digit:]]{1,2}),' # 2 capture groups: adapter_number and xid_code
+	#                                                      ^^^^^^^^^^^^^^^                      ^^^^^^^^^^^^^^^^
+
+	# var
+
+	local adapter_number=''
+	local -i xid_code=0
+
+	# code
+
+	if [[ $line_of_text =~ $NVRM_XID_RE ]]; then
+		adapter_number="${BASH_REMATCH[1]}"
+		xid_code="${BASH_REMATCH[2]}"
+#		printf 'adapter %s, xid %d\n' "$adapter_number" "$xid_code"
+	fi
+
+	printf '%d\n' "$xid_code"
 }
 
 print_system_state() {
@@ -228,19 +262,23 @@ write_message_to_log() {
 
 send_message_to_frontend() {
 	#
-	# Usage: send_message_to_frontend 'frontend header' 'formatted_message'
+	# Usage: send_message_to_frontend 'frontend_header' ['formatted_message']
 	#
-	arguments: $# exactly 2
+	arguments: $# range 1 2
 
 	# args
 
 	local -r frontend_header="$1"
-	local -r formatted_message="$2"
+	local -r formatted_message="${2-}"
 
 	# code
 
-	# highlight pattern and send
-	printf '%s' "$formatted_message" | grep --color=always "$NVRM_COMMON_EVENT_PATTERN"'\|$' | message err "$frontend_header" payload > /dev/null
+	if is_variable_not_empty "${formatted_message-}"; then
+		# highlight pattern and send
+		printf '%s' "$formatted_message" | grep --color=always "$NVRM_XID_EVENT_PATTERN"'\|$' | message err "$frontend_header" payload > /dev/null
+	else
+		message err "$frontend_header" > /dev/null
+	fi
 }
 
 do_simple_error_report() {
@@ -256,6 +294,7 @@ do_simple_error_report() {
 	# vars
 
 	local gpu_index=''
+	local -i xid_code=0
 	local frontend_header=''
 	local message_header=''
 	local message_body=''
@@ -264,11 +303,12 @@ do_simple_error_report() {
 	# code
 
 	# get gpu index
-	readonly gpu_index="$( get_gpu_index_from "$line" )"
+	readonly gpu_index="$( get_gpu_index_from_string "$line" )"
+	readonly xid_code="$( get_xid_code_from_string "$line" )"
 
 	# compose headers
 	if [[ gpu_index != '?' ]]; then
-		readonly frontend_header="GPU$gpu_index error"
+		readonly frontend_header="GPU$gpu_index error $xid_code"
 	else
 		readonly frontend_header="Adapter failed"
 	fi
@@ -311,6 +351,49 @@ do_extended_error_report() {
 	send_message_to_frontend "$frontend_header" "$formatted_message" & # send to background for better responsiveness
 }
 
+cold_reboot() {
+	#
+	# Usage: cold_reboot
+	#
+	arguments: $# none
+
+	# consts
+
+	local -r -i seconds_before_reboot=20
+
+	# code
+
+	sleep "$seconds_before_reboot"
+	sync
+	sreboot wakealarm
+}
+
+red_flag_check() {
+	#
+	# Usage: red_flag_check 'line_of_text'
+	#
+	arguments: $# exactly 1
+
+	# args
+
+	local -r line_of_text="$1"
+
+	# vars
+
+	local -i xid_code=0
+
+	# code
+
+	xid_code="$( get_xid_code_from_string "$line_of_text" )"
+
+	case "$xid_code" in
+		8|32|61|62|69|79)
+			send_message_to_frontend "Xid $xid_code, reboot" &
+			cold_reboot &
+			;;
+	esac
+}
+
 wait_for_errors() {
 	#
 	# Usage: wait_for_errors
@@ -319,18 +402,18 @@ wait_for_errors() {
 
 	# consts
 
-	local -r waiting_message="Waiting for pattern '$NVRM_COMMON_EVENT_PATTERN'"
+	local -r waiting_message="Waiting for pattern '$NVRM_XID_EVENT_PATTERN'"
 
 	# vars
 
 	local line=''
-	local nvrm_common_event_happened_flag=''
+	local nvrm_xid_event_happened_flag=''
 	local nvrm_init_adapter_failed_happened_flag=''
 
 	# code
 
 	echo -e -n "${WHITE}${waiting_message}...${NOCOLOR}"
-	SECONDS='0' # reset seconds since the last accident
+	SECONDS=0 # bash built-in var, use it as seconds since last incident
 
 	# feeding from 'tail -f', waiting the patterns to come
 	while read line; do
@@ -347,9 +430,10 @@ wait_for_errors() {
 					:
 				fi
 				;;
-			*"$NVRM_COMMON_EVENT_PATTERN"*)
-				if is_variable_empty "$nvrm_common_event_happened_flag"; then
-					readonly nvrm_common_event_happened_flag='sad but true' # it's a first time error, set flag
+			*"$NVRM_XID_EVENT_PATTERN"*)
+				if is_variable_empty "$nvrm_xid_event_happened_flag"; then
+					red_flag_check "$line" & # do cold reboot on some Xid codes
+					readonly nvrm_xid_event_happened_flag='sad but true' # it's a first time error, set flag
 					echo
 					echo -n "$(log_prefix) Pattern matched! Sending immediate report..." # ...on the first occurence of an error
 					do_simple_error_report "$line" & # send to background for better responsiveness
@@ -360,7 +444,7 @@ wait_for_errors() {
 				fi
 				;;
 			*)
-				if is_variable_empty "$nvrm_common_event_happened_flag"; then
+				if is_variable_empty "$nvrm_xid_event_happened_flag"; then
 					echo -e -n "\r${WHITE}${waiting_message} for $( time::seconds2dhms "$SECONDS" )...   ${NOCOLOR}"
 				else
 					echo -n "$(log_prefix) Unrelevant log line arrived. Sending extended report on all previous errors..."
@@ -381,16 +465,15 @@ screen:run() {
 
 	# consts
 
-	local -i -r LOG_LINES='35'
+	local -i -r LOG_LINES=35
 	local -r FROM_LOG='/var/log/syslog'
 	# shellcheck disable=SC2154
 	local -r TO_LOG="$script_log"
 
 	# log line looks like: ' Apr 16 14:30:22 ch1 kernel: [   19.034938] NVRM: loading NVIDIA UNIX x86_64 Kernel Module  418.43  Tue Feb 19 01:12:11 CST 2019'
-	local -r NVRM_COMMON_EVENT_PATTERN='NVRM: Xid' ###'NVRM'
+	local -r NVRM_XID_EVENT_PATTERN='NVRM: Xid'
 	# sometimes driver doesn't do well: 'Jun  3 02:34:32 ch3 kernel: [  931.960716] NVRM: RmInitAdapter failed! (0x31:0xffff:835)'
 	local -r NVRM_INIT_ADAPTER_FAILED_PATTERN='dapter failed'
-	#is_debug && NVRM_COMMON_EVENT_PATTERN='(/hive'
 
 	# vars
 

@@ -7,7 +7,7 @@
 
 # shellcheck disable=SC2034
 {
-	declare -r script_version='0.6.3'
+	declare -r script_version='0.6.6'
 	declare -r script_description='Positionless Nvidia UUID overclock manager for HiveOS'
 	declare -r script_usage='[r[efresh]]\n\n*** Must be sourced inside of the nvidia-oc script. ***'
 	declare -r script_name="${BASH_SOURCE[0]}"
@@ -260,9 +260,9 @@ init_base_data_structures() {
 	declare -r -g -a algo_list=(
 		'default'
 		'cuckoo'
-		'equihash 150/5'
+		'equihash 150/5/3'
 		'ethash'
-		'x16r'
+		'x16rv2'
 	)
 
 	# O/C elements from Hive API
@@ -284,8 +284,8 @@ init_base_data_structures() {
 	)
 
 	declare -r -g -A fs_algo_to_oc_algo_dictionary=(
-		['Autoswitch Beam']='equihash 150/5'
-		['Autoswitch BeamV2']='equihash 150/5'
+		['Autoswitch Beam']='equihash 150/5/3'
+		['Autoswitch BeamV2']='equihash 150/5/3'
 		['Autoswitch CryptoNightHeavy']=''
 		['Autoswitch CryptoNightR']=''
 		['Autoswitch CryptoNightV7']=''
@@ -304,7 +304,8 @@ init_base_data_structures() {
 		['Autoswitch NeoScrypt']=''
 		['Autoswitch Nist5']=''
 		['Autoswitch Skunk']=''
-		['Autoswitch X16r']='x16r'
+		['Autoswitch X16r']='x16rv2'
+		['Autoswitch X16Rv2']='x16rv2'
 		['Autoswitch Zhash']=''
 		['Autoswitch Zil']=''
 	)

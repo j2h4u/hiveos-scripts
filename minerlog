@@ -19,6 +19,9 @@ declare pattern=''
 # code
 
 case "$MINER" in
+	'ccminer')
+		pattern='[Dd]ifficulty\|accepted\|[Ee]rror'
+		;;
 	'cryptodredge')
 		pattern=' : diff=\|Hash order\|[Ee]rror'
 		;;
@@ -29,10 +32,10 @@ case "$MINER" in
 		pattern='^[^ ]'
 		;;
 	'ethminer')
-		pattern='Speed \|epoch\|incorrect'
+		pattern='Speed \|epoch\|incorrect\|\*\*'
 		;;
 	't-rex')
-		pattern=' OK \|Uptime\|[Ee]rror'
+		pattern=' OK \|Uptime\|[Ee]rror\|difficulty'
 		;;
 	*)
 		echo 'No pattern found for that miner!'

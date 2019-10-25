@@ -6,20 +6,19 @@ set -u
 source colors
 
 
-# consts
-
-declare -r speed_prefix_RE='Speed '$'\e''\[1;36m[0-9]{1,5}\.[0-9]{2}'
-declare -r single_gpu_RE='gpu[0-9]{,2} '$'\e''\[36m[0-9]{1,5}\.[0-9]{2}'
-declare -r zero_hashrate_RE='m0\.00'
-declare -r three_figures_hashrate_RE='m[0-9]{3}\.[0-9]{2}'
-
-
-# vars
-
-declare global_RE="($speed_prefix_RE)"
-
-
 # functions
+
+print_terminated_gpus() {
+	# args
+	local file="$1"
+	# vars
+	local grep_answer=''
+	# code
+	if grep_answer="$( echo -n 'Terminated: '; grep --text --color=never 'GPU error' "$file" )"; then
+		echo -e "$grep_answer"
+		return 1
+	fi
+}
 
 print_incorrect_shares() {
 	# args
@@ -27,7 +26,7 @@ print_incorrect_shares() {
 	# vars
 	local grep_answer=''
 	# code
-	if grep_answer="$( echo -n 'Incorrect shares: '; grep --color=never 'incorrect' "$file" )"; then
+	if grep_answer="$( echo -n 'Incorrect shares: '; grep --text --color=never 'incorrect' "$file" )"; then
 		echo -e "$grep_answer"
 		return 1
 	fi
@@ -58,7 +57,7 @@ print_fallen_gpus() {
 				fi
 			fi
 		fi
-	done <<< "$( grep --color=never "$zero_hashrate_RE" "$file" )"
+	done <<< "$( grep --text --color=never "$zero_hashrate_RE" "$file" )"
 
 	if [[ "$fallen_gpu_found" == 'true' ]]; then
 		return 1
@@ -72,28 +71,88 @@ print_string_if_not_empty() {
 	fi
 }
 
+get_gpu_count() {
+
+	# args
+
+	local file="$1"
+
+	# vars
+
+	local -i gpu_number
+	local -i gpu_count=0
+	local gpu_found='false'
+
+	# code
+
+	for gpu_number in {13..0}; do
+		if fgrep --text --silent " gpu${gpu_number} " "$file"; then
+			gpu_found='true'
+			break
+		fi
+	done
+
+	if [[ $gpu_found == 'true' ]]; then
+		(( gpu_count = gpu_number + 1 ))
+	fi
+
+	printf '%d\n' "$gpu_count"
+}
+
+
+# consts
+
+declare -r speed_prefix_RE='Speed '$'\e''\[1;36m[0-9]{1,5}\.[0-9]{2}'
+declare -r single_gpu_RE='gpu[0-9]{,2} '$'\e''\[36m[0-9]{1,5}\.[0-9]{2}'
+declare -r zero_hashrate_RE='m0\.00'
+declare -r three_figures_hashrate_RE='m[0-9]{3}\.[0-9]{2}'
+
+
+# vars
+
+declare global_RE=''
+declare -i gpu_count=0
+declare -i capture_group
+
+
 # code
 
-for loop in {1..13}; do # make 13 capture groups for each GPU
-	global_RE+=".+($single_gpu_RE)"
-done
-
 for file in /var/log/miner/ethminer/ethminer.{5..1}.log /var/log/miner/ethminer/ethminer.log ; do
+
 	something_bad_happens='false'
-	echo -e -n "${DGRAY}Processing $file${NOCOLOR}"
+	echo -e -n "${DGRAY}Processing ${file}${NOCOLOR}"
 
 	if [[ -f "$file" ]]; then
-		incorrect_shares="$( print_incorrect_shares "$file" )" || something_bad_happens='true'
-		fallen_gpus="$( print_fallen_gpus "$file" )" || something_bad_happens='true'
 
-		if [[ "$something_bad_happens" == 'true' ]]; then
-			echo -e "${DGRAY}:${NOCOLOR}"
-			print_string_if_not_empty "$incorrect_shares"
-			print_string_if_not_empty "$fallen_gpus"
-			echo
+		gpu_count="$( get_gpu_count "$file" )"
+		echo -e -n "${DGRAY}, ${GREEN}${gpu_count}${DGRAY} gpu found${NOCOLOR}"
+
+		if (( gpu_count > 0 )); then
+
+			# create capture group for each GPU
+			global_RE="($speed_prefix_RE)"
+			for (( capture_group=1; capture_group <= gpu_count; capture_group++ )); do
+				global_RE+=".+($single_gpu_RE)"
+			done
+
+			incorrect_shares="$( print_incorrect_shares "$file" )" || something_bad_happens='true'
+			fallen_gpus="$( print_fallen_gpus "$file" )" || something_bad_happens='true'
+			terminated_gpus="$( print_terminated_gpus "$file" )" || something_bad_happens='true'
+
+			if [[ "$something_bad_happens" == 'true' ]]; then
+				echo -e "${DGRAY}:${NOCOLOR}"
+				print_string_if_not_empty "$incorrect_shares"
+				print_string_if_not_empty "$fallen_gpus"
+				print_string_if_not_empty "$terminated_gpus"
+				echo
+			else
+				echo -e "${DGRAY}... No errors, skipping.${NOCOLOR}"
+			fi
+
 		else
-			echo -e "${DGRAY}... No errors, skipping.${NOCOLOR}"
+			echo -e "${DGRAY}... ${RED}Hashrate info not found, skipping.${NOCOLOR}"
 		fi
+
 	else
 		echo -e "${DGRAY}... ${RED}File not found, skipping.${NOCOLOR}"
 	fi
