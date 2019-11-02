@@ -6,7 +6,7 @@
 #
 
 # shellcheck disable=SC2034
-readonly script_version='3.0.5'
+readonly script_version='3.0.6'
 # shellcheck disable=SC2034
 readonly script_description='Report and log NVIDIA XID errors in realtime'
 script_usage='[start | stop | restart]'
@@ -365,7 +365,7 @@ cold_reboot() {
 
 	sleep "$seconds_before_reboot"
 	sync
-	sreboot wakealarm
+	nohup bash -c 'sreboot wakealarm' >> /tmp/nohup.log 2>&1 &
 }
 
 red_flag_check() {
