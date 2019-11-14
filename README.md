@@ -5,6 +5,7 @@
 - **functions.sh**        My little bash functions library. Syntax sugar, mostly.
 - **hive_api**            HiveOS API library
 - **json-to-array.sh**    An unfinished lesson on converting JSON to bash arrays
+- **send-file-to-dashboard**    Send any file to dashboard. Wildcards supported.
 
 ## Autoswitch related
 - **autoswitch-profile**  Manages day/night profiles for HiveOS Autoswitch
