@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+
+#
+# strict mode, no unbound variables
+#
+
+set -o nounset
+
+
+#
+# consts
+#
+
+declare -r -i c_false=0
+declare -r -i c_true=1
+declare -r -i arguments_count=$#
+
+#
+# vars
+#
+
+declare -i something_wrong=c_false
+declare file_to_send=''
+declare file_size=''
+
+
+#
+# code
+#
+
+. colors
+
+if (( arguments_count > 0 )); then
+	for file_to_send in "$@"; do
+		echo -n -e "${YELLOW}$file_to_send${NOCOLOR}: "
+		if [ -e "$file_to_send" ]; then
+			if [ -f "$file_to_send" ]; then
+				echo -e -n "sending to dashboard..."
+				file_size="$(du --human-readable --apparent-size "$file_to_send" | awk '{print $1}')b"
+				gzip --best --stdout "$file_to_send" | base64 --wrap=0 | message file "$file_to_send ($file_size)" payload > /dev/null
+				if (( $? == 0 )); then
+					echo -e " ${BGREEN}Done.${NOCOLOR}"
+				else
+					echo -e " ${BRED}Something wrong.${NOCOLOR}"
+					something_wrong=c_true
+				fi
+			else
+				echo -e "${RED}not a regular file, skipping${NOCOLOR}"
+				something_wrong=c_true
+			fi
+		else
+			echo -e "${BRED}not found, skipping${NOCOLOR}"
+			something_wrong=c_true
+		fi
+	done
+else
+	echo 'Sends any file to HiveOS dashboard. Wildcards supported.'
+	echo
+	echo -e "Usage: ${CYAN}$(basename "$0") filename [filename...]${NOCOLOR}"
+	echo
+	something_wrong=c_true
+fi
+
+if (( something_wrong )); then
+	exit 1
+else
+	exit 0
+fi
