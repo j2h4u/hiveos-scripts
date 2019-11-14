@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 
+
 #
 # strict mode, no unbound variables
 #
