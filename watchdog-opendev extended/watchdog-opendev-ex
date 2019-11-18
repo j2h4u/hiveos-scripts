@@ -1,0 +1,238 @@
+#!/usr/bin/env bash
+
+[[ -z $1 ]] &&
+	echo "Usage: `basename $0` ping|reset|power|fw|read|settings [port]" &&
+	exit 1
+
+PORT=/dev/ttyACM0
+
+if [ ! -z $2 ]; then
+	if [[ $2 == "/dev/sg0" || $2 == "/dev/hidraw0" ]]; then
+		echo "Skipping buggy detected port $2"
+		exit 1;
+	fi
+	PORT=$2
+	echo "Using $PORT"
+else
+	echo "Using $PORT by default"
+fi
+
+[[ ! -c $PORT ]] &&
+	echo "$PORT is not a character device" &&
+	exit 1
+
+
+if [[ $1 == "reset" ]]; then
+	echo "Pushing Reset"
+	echo -n "~T1" > $PORT
+	exit 0
+fi
+
+
+if [[ $1 == "power" ]]; then
+	echo "Pushing Power"
+	echo -n "~T2" > $PORT
+	exit 0
+fi
+
+
+DMPLOG=/tmp/owdump.log
+
+watchdog_query() {
+	stty -F $PORT 115200 raw -echo
+	for (( i=1; i <= 10; i++ ))
+	do
+		exec 9< $PORT
+		cat <&9 > $DMPLOG &
+		echo -n $1 > $PORT
+		sleep 0.1s
+		kill -INT $!
+		exec 9<&-
+		reply=`cat $DMPLOG | cut -d"~" -f 2`
+		if [ ! -z "$reply" ]; then
+			break
+		fi
+	done
+	echo $reply
+}
+
+
+if [[ $1 == "fw" ]]; then
+	echo "Reading firmware version"
+	watchdog_query "~I"
+	exit 0
+fi
+
+if [[ $1 == "read" ]]; then
+	echo "Reading settings"
+	watchdog_query "~F"
+	exit 0
+fi
+
+watchdog_settings_decode() { # configuration string deserialization
+	#
+	# Watchdog Lite
+	#
+	# #		unit		desc
+	# --------------------------------------------------------------------------------------------
+	# 1		1 мин*		Ожидания сигнала перезагрузки (t1).
+	# 2		100 мс*		Длительность импульса сигнала «Reset» (t2). Для версии выпуском позднее 07.2017.
+	#					*значения параметров могут быть в диапазоне 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, A(10), B(11), C(12), D(13), E(14), F(15).
+	#
+	# Watchdog Pro2
+	#
+	# #		unit		desc
+	# --------------------------------------------------------------------------------------------
+	# 1		1 мин*		Ожидания сигнала перезагрузки (t1).
+	# 2		100 мс*		Длительность импульса сигнала «Reset» (t2).
+	# 3		1 с*		Длительность импульса сигнала «Power» (t3).
+	# 4		1 с*		Длительность ожидания (t4).
+	# 5		100 мс*		Длительность импульса сигнала «Power» (t5).
+	# 6					Режим канала 1: 0 - выкл, 1 - RESET, 2 - POWER, 3 - управляемый (нач. сост. - открыт), 4 - управляемый (нач. сост. - закрыт).
+	# 7					Режим канала 2: 0 - выкл, 1 - RESET, 2 - POWER, 3 - управляемый (нач. сост. - открыт), 4 - управляемый (нач. сост. - закрыт).
+	# 8					Ограничение количества перезагрузок. 0 - нет ограничений.
+	# 9					Режим канала 3 (Вх/In): 0 - выкл, 1 - дискретный вход, 3 - вход датчика температуры ds18b20.
+	# 10				Пороговое значение температуры для автоматического перезапуска. Актуально при канале 3 (Вх/In), установленном в режим опроса датчика температуры. Задаётся значением пороговой температуры в шестнадцатеричном формате, например: 32 градуса - 20, 80 градусов - 50, 00 - отключено.
+	#					*значения параметров 1-5 могут быть в диапазоне 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, A(10), B(11), C(12), D(13), E(14), F(15).
+
+	# args
+
+	local -r settings_string_raw="${1-}"
+
+
+	# consts
+
+	local -r -i settings_string_size=${#settings_string_raw}
+	local -r long_line='--------------------------------------------------------------------------------------------------------'
+
+	# defaults
+
+	local -r watchdog_version_DEFAULT='unknown'
+	local -r -i chunk_size_DEFAULT=1
+	local -r title_DEFAULT='default title'
+	local -r -i unit_multiplier_DEFAULT=1
+
+	# dicts
+
+	local -r -a watchdog_version_dictionary=(
+		[3]='Lite'
+		[12]='Pro'
+	)
+
+	# A simple associative dictionary with [offset.entity] structure. Entities are:
+	# title
+	# size (default: 1 char)
+	# unit (default: none)
+	# unit_multiplier (default: 1)
+	# valueN (default: none)
+	local -r -A settings_dictionary=(
+		['0.title']='Always 15 (0x0F)'
+
+		['1.title']="Time interval before RESET signal (t1)"
+		['1.unit']='min'
+
+		['2.title']='RESET signal duration (t2)'
+		['2.unit']='ms'
+		['2.unit_multiplier']='100'
+
+		['3.title']='POWER-OFF signal duration (t3)'
+		['3.unit']='sec'
+
+		['4.title']='Pause between POWER signals (t4)'
+		['4.unit']='sec'
+
+		['5.title']='POWER-ON signal duration (t5)'
+		['5.unit']='ms'
+		['5.unit_multiplier']='100'
+
+		['6.title']='Channel 1 (Output)' #: 0 - выкл, 1 - RESET, 2 - POWER, 3 -управляемый (нач. сост. - открыт), 4 - управляемый (нач.сост. - закрыт).'
+		['6.value0']='<not used>'
+		['6.value1']='RESET'
+		['6.value2']='POWER'
+		['6.value3']='managed (initial state: OPENED)'
+		['6.value4']='managed (initial state: CLOSED)'
+
+		['7.title']='Channel 2 (Output)' #: 0 - выкл, 1 - RESET, 2 - POWER, 3 -управляемый (нач. сост. - открыт), 4 - управляемый (нач.сост. - закрыт).'
+		['7.value0']='<not used>'
+		['7.value1']='RESET'
+		['7.value2']='POWER'
+		['7.value3']='managed (initial state: OPENED)'
+		['7.value4']='managed (initial state: CLOSED)'
+
+		['8.title']='Limit RESET attempts'
+		['8.unit']='times'
+		['8.value0']='no limit'
+
+		['9.title']='Channel 3 (Input)' #: 0 - выкл, 1 - дискретный вход, 3 -вход датчика температуры ds18b20.'
+		['9.value0']='<not used>'
+		['9.value1']='Digital input'
+		['9.value3']='Temperature sensor (ds18b20)'
+
+		['10.title']='Temperature threshold for RESET' #Пороговое значение температуры для автоматического перезапуска. Актуально при канале 3 (Вх/In), установленном в режим опроса датчика температуры. Задаётся значением пороговой температуры в шестнадцатеричном формате, например: 32 градуса - 20, 80 градусов - 50, 00 - отключено.'
+		['10.size']=2
+		['10.unit']='°C'
+		['10.value0']='<not used>'
+	)
+
+
+	# code
+
+	echo "Watchdog version: ${watchdog_version_dictionary[settings_string_size]:-${watchdog_version_DEFAULT}} ($settings_string_size chars)"
+	echo "Raw configuration: '$settings_string_raw', decoding:"
+	printf '%s\n' "$long_line"
+	printf '| %2.2s | %40.40s | %-40.40s | %3.3s | %3.3s |\n' '#' 'Description' 'Decoded value' 'DEC' 'HEX'
+	printf '%s\n' "$long_line"
+
+	# let's deserialize
+	for (( offset=0; offset < settings_string_size; )); do
+		title="${settings_dictionary[${offset}.title]:-${title_DEFAULT}}"
+		chunk_size="${settings_dictionary[${offset}.size]:-${chunk_size_DEFAULT}}"
+
+		char_in_hex="${settings_string_raw:${offset}:${chunk_size}}"
+		char_in_dec="$(( 16#${char_in_hex} ))"
+
+		# first we'll go for enums, then for units
+
+		# are there enum values in the dictionary?
+		if [ -n "${settings_dictionary[${offset}.value${char_in_dec}]}" ]; then
+			# yes, we've got enums, let's use them
+			decoded_value="${settings_dictionary[${offset}.value${char_in_dec}]}"
+		else
+			# no enums. are there units in the dictionary?
+			if [ -n "${settings_dictionary[${offset}.unit]}" ]; then
+				# yes, we've got units, let's use them
+				unit_name="${settings_dictionary[${offset}.unit]}"
+				unit_multiplier="${settings_dictionary[${offset}.unit_multiplier]:-${unit_multiplier_DEFAULT}}"
+				value=$(( char_in_dec * unit_multiplier ))
+				decoded_value="$value $unit_name"
+			else
+				# enums: none, units: none. nothing to decode.
+				decoded_value='-'
+			fi
+		fi
+
+		printf '| %2.2s | %40.40s | %-40.40s | %3d |  %02X |\n' "$offset" "$title" "$decoded_value" "$char_in_dec" "0x$char_in_hex" 
+
+		(( offset += chunk_size ))
+	done
+
+	printf '%s\n' "$long_line"
+}
+
+if [[ $1 == "settings" ]]; then
+	echo "Reading settings"
+	watchdog_settings_decode "$( watchdog_query "~F" )"
+	exit 0
+fi
+
+
+#should be ping here, but will work with any
+#if port 22 (ssh) responds then
+#send ping signal to WD, if WD does not receive it for a while, then WD RESET the MB.
+
+while true
+do
+	echo "Pinging watchdog"
+	[[ `nc -w 2 -zv localhost 22 2>&1 | grep -c succeeded` -gt 0 ]] && echo -n "~U" > $PORT
+	sleep 5
+done
