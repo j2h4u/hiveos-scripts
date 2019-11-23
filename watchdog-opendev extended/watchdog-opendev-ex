@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 [[ -z $1 ]] &&
-	echo "Usage: `basename $0` ping|reset|power|fw|read|settings [port]" &&
+	echo "Usage: `basename $0` ping|reset|power|fw|read|settings|temperature [port]" &&
 	exit 1
 
 PORT=/dev/ttyACM0
@@ -120,15 +120,16 @@ watchdog_settings_decode() {
 	# dicts
 
 	local -r -a watchdog_version_dictionary=(
+		[2]='Lite, before 07.2017'
 		[3]='Lite'
-		[12]='Pro'
+		[12]='Pro2'
 	)
 
 	local -r -A settings_dictionary=(
 		# A simple associative dictionary with [offset.entity] structure. Entities are:
 		# title
 		# size (default: 1 char)
-		# unit (default: none)
+		# unit (default: empty)
 		# unit_multiplier (default: 1)
 		# valueN (default: none)
 
@@ -183,8 +184,8 @@ watchdog_settings_decode() {
 
 	# code
 
-	echo "Watchdog version: ${watchdog_version_dictionary[settings_string_size]:-${watchdog_version_DEFAULT}} ($settings_string_size chars)"
-	echo "Raw configuration: '$settings_string_raw', decoding:"
+	printf 'Watchdog version: %s (%d chars)\n' "${watchdog_version_dictionary[settings_string_size]:-${watchdog_version_DEFAULT}}" "$settings_string_size"
+	printf "Raw configuration: '%q', decoding:\n" "$settings_string_raw"
 	printf '%s\n' "$long_line"
 	printf '| %2.2s | %40.40s | %-40.40s | %3.3s | %3.3s |\n' '#' 'Description' 'Decoded value' 'DEC' 'HEX'
 	printf '%s\n' "$long_line"
@@ -224,7 +225,8 @@ watchdog_settings_decode() {
 			printf '| %2.2s | %40.40s | %-40.40s | %3d |  %2.2s |\n' "$offset" "$title" "$decoded_value" "$char_in_dec" "$char_in_hex"
 		else
 			# didn't validated, print some diagnostic info
-			chunk_raw_ascii="$( printf '%d' "'$chunk_raw" )"
+			chunk_raw_ascii="$( printf '%d' "'$chunk_raw" )" # get the ascii-code of the symbol
+			#                                ^ and yes it's fully legit, trust me
 			printf '| %2.2s | %40.40s | %-40.40s | %3.3s |  %2.2s |\n' "$offset" "$title" "ERR: '$chunk_raw' (ASCII $chunk_raw_ascii) is not a hex number" '-' '-' 
 		fi
 		(( offset += chunk_size ))
@@ -235,7 +237,31 @@ watchdog_settings_decode() {
 
 if [[ $1 == "settings" ]]; then
 	echo "Reading settings"
-	watchdog_settings_decode "$( watchdog_query "~F" )"
+	watchdog_settings_decode "$( watchdog_query '~F' )"
+	exit 0
+fi
+
+if [[ $1 == "temperature" ]]; then
+	echo 'Reading temperature'
+	raw_answer_string="$( watchdog_query '~G' )"
+
+	# check for valid temperature. not sure there're negative numbers, but why not?
+	# regex is: 1st=digit or '-'; 2nd=digit; 3rd=digit; 4th=digit
+	if [[ $raw_answer_string =~ ^G(-|[[:digit:]])[[:digit:]]{3}$ ]]; then
+		# watchdog gives us 5 chars: 'G' + temperature multiplied by 10. let's decompose:
+		temperature_with_sign="${raw_answer_string:1}" # strip 'G'
+		# decouple number and its sign
+		if [[ "${temperature_with_sign:0:1}" == '-' ]]; then
+			sign='-'; unsigned_temperature="${temperature_with_sign:1}" # strip sign
+		else
+			sign='+'; unsigned_temperature="${temperature_with_sign}" # do nothing
+		fi
+		printf '%.1f °C\n' "$((10**9 * ${sign}10#${unsigned_temperature}/10))e-9"
+	elif [[ "$raw_answer_string" == 'GEEEE' ]]; then
+		echo 'Error, no temperature sensor attached'
+	else
+		echo "Unknown error, answer is '$raw_answer_string'"
+	fi
 	exit 0
 fi
 
