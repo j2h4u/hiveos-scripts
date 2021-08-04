@@ -1843,7 +1843,7 @@ if (( extended_oc_management_enabled )); then
 	fi
 fi
 
-# for dumb HiveOS devs
+# for dumb HiveOS scripts
 set +o nounset
 
 #
